@@ -256,7 +256,7 @@ def main():
         list(model.parameters()) + list(sigreg.parameters()),
         lr=LR, weight_decay=1e-3,
     )
-    scaler = torch.cuda.amp.GradScaler() if device.type == 'cuda' else None
+    scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
 
     # ── Resume from checkpoint ────────────────────────────────────────────────
     start_epoch   = 1
@@ -288,7 +288,7 @@ def main():
         for batch in train_loader:
             optimizer.zero_grad()
             if scaler:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     loss, pl, sl = step_fn(batch, model, sigreg, device, dtype)
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
