@@ -3,7 +3,7 @@
 # Usage: bash launch_datagen.sh [--n-transitions N]
 #
 # Output: s3://leworldduckie/data/duckietown_100k.h5
-# Logs:   s3://leworldduckie/logs/datagen_<run_id>.log
+# Logs:   s3://test-854656252703/lewm-datagen/logs/datagen_<run_id>.log
 
 set -euo pipefail
 
@@ -13,7 +13,8 @@ INSTANCE_TYPE=t3.medium          # 4 GB RAM — enough headroom for gym-duckieto
 INSTANCE_PROFILE=lewm-ec2-training
 SECURITY_GROUP=sg-03bbca875466eb52a
 SUBNET=subnet-00ef452a9147da192  # us-east-1a (t3 not available in us-east-1e)
-S3_BUCKET=leworldduckie
+LOG_BUCKET=test-854656252703     # role has confirmed access here
+DATA_BUCKET=leworldduckie
 
 N_TRANSITIONS=100000
 while [[ $# -gt 0 ]]; do
@@ -24,25 +25,28 @@ while [[ $# -gt 0 ]]; do
 done
 
 RUN_ID=$(date -u +%Y%m%d_%H%M%S)
-SCRIPT_S3_KEY="scripts/generate_data_${RUN_ID}.py"
 
-echo "==> Uploading generate_data.py to s3://${S3_BUCKET}/${SCRIPT_S3_KEY} ..."
-aws s3 cp "$(dirname "$0")/generate_data.py" "s3://${S3_BUCKET}/${SCRIPT_S3_KEY}" --region $REGION
+# Embed generate_data.py as base64 so the instance needs no S3 download permissions
+PYBASE64="IiIiCkdlbmVyYXRlIGR1Y2tpZXRvd24gZGF0YXNldCBmcm9tIHRoZSByZWFsIGd5bS1kdWNraWV0b3duIHNpbXVsYXRvci4KU2F2ZXMgYW4gSERGNSBmaWxlIGFuZCBvcHRpb25hbGx5IHVwbG9hZHMgdG8gUzMuCgpSZXF1aXJlbWVudHMgKFB5dGhvbiAzLjEwKToKICAgIHBpcCBpbnN0YWxsIGR1Y2tpZXRvd24tZ3ltLWRhZmZ5IHB5Z2xldD09MS41LjI3IGg1cHkgYm90bzMKICAgIHN1ZG8gYXB0LWdldCBpbnN0YWxsIGxpYmdsMSBsaWJnbHUxLW1lc2EgbGliZ2xpYjIuMC0wIHh2ZmIKICAgICMgc3ltbGluayBtYXBzOgogICAgbG4gLXNmICQocHl0aG9uMyAtYyAiaW1wb3J0IGR1Y2tpZXRvd25fd29ybGQsb3M7cHJpbnQob3MucGF0aC5kaXJuYW1lKGR1Y2tpZXRvd25fd29ybGQuX19maWxlX18pKSIpL2RhdGEvZ2QxL21hcHMgXAogICAgICAgICQocHl0aG9uMyAtYyAiaW1wb3J0IGd5bV9kdWNraWV0b3duLG9zO3ByaW50KG9zLnBhdGguZGlybmFtZShneW1fZHVja2lldG93bi5fX2ZpbGVfXykpIikvbWFwcwoKVXNhZ2U6CiAgICAjIFN0YXJ0IHZpcnR1YWwgZGlzcGxheSBmaXJzdCAoaGVhZGxlc3Mgc2VydmVyKToKICAgIFh2ZmIgOjk5IC1zY3JlZW4gMCAxMDI0eDc2OHgyNCAmCiAgICBESVNQTEFZPTo5OSBweXRob24zIGdlbmVyYXRlX2RhdGEucHkgLS1uLXRyYW5zaXRpb25zIDEwMDAwMCAtLXVwbG9hZAoiIiIKCmltcG9ydCBhcmdwYXJzZSwgb3MsIHRpbWUsIHdhcm5pbmdzCndhcm5pbmdzLmZpbHRlcndhcm5pbmdzKCdpZ25vcmUnKQppbXBvcnQgbG9nZ2luZzsgbG9nZ2luZy5kaXNhYmxlKGxvZ2dpbmcuSU5GTykKCmltcG9ydCBudW1weSBhcyBucAppbXBvcnQgaDVweQpmcm9tIHBhdGhsaWIgaW1wb3J0IFBhdGgKClMzX0JVQ0tFVCAgID0gJ2xld29ybGRkdWNraWUnClMzX0RBVEFfS0VZID0gJ2RhdGEvZHVja2lldG93bl8xMDBrLmg1JwoKTUFQUyA9IFsKICAgICdzbWFsbF9sb29wJywgJ3NtYWxsX2xvb3BfY3cnLCAnbG9vcF9lbXB0eScsCiAgICAnc3RyYWlnaHRfcm9hZCcsICd6aWd6YWdfZGlzdHMnLCAndWRlbTEnLApdCgpJTUdfSCwgSU1HX1cgPSAxMjAsIDE2MApXUklURV9DSFVOSyAgPSAxMDAwICAjIGZsdXNoIHRvIGRpc2sgZXZlcnkgTiB0cmFuc2l0aW9ucwoKCmNsYXNzIFBEQ29udHJvbGxlcjoKICAgICIiIlNpbXBsZSBQRCBsYW5lLWZvbGxvd2VyIG9uIHRoZSB5ZWxsb3cgY2VudHJlIGxpbmUuIiIiCiAgICBkZWYgX19pbml0X18oc2VsZiwga3A9MC40NSwga2Q9MC4yNSwgbm9pc2Vfc3RkPTAuMDYsIHNwZWVkPTAuMzUpOgogICAgICAgIHNlbGYua3AgPSBrcAogICAgICAgIHNlbGYua2QgPSBrZAogICAgICAgIHNlbGYubm9pc2Vfc3RkID0gbm9pc2Vfc3RkCiAgICAgICAgc2VsZi5zcGVlZCA9IHNwZWVkCiAgICAgICAgc2VsZi5wcmV2X2Vycm9yID0gMC4wCgogICAgZGVmIGFjdChzZWxmLCBvYnMsIHJuZyk6CiAgICAgICAgeWVsbG93ID0gKG9ic1s6LCA6LCAwXSA+IDE3MCkgJiAob2JzWzosIDosIDFdID4gMTUwKSAmIChvYnNbOiwgOiwgMl0gPCAxMDApCiAgICAgICAgY3ggPSBvYnMuc2hhcGVbMV0gLy8gMgogICAgICAgIGlmIHllbGxvdy5hbnkoKToKICAgICAgICAgICAgXywgeHMgPSBucC53aGVyZSh5ZWxsb3cpCiAgICAgICAgICAgIGVycm9yID0gKHhzLm1lYW4oKSAtIGN4KSAvIGN4CiAgICAgICAgZWxzZToKICAgICAgICAgICAgZXJyb3IgPSBzZWxmLnByZXZfZXJyb3IKICAgICAgICBzdGVlciA9IC0oc2VsZi5rcCAqIGVycm9yICsgc2VsZi5rZCAqIChlcnJvciAtIHNlbGYucHJldl9lcnJvcikpCiAgICAgICAgc2VsZi5wcmV2X2Vycm9yID0gZXJyb3IKICAgICAgICB2ZWwgICA9IGZsb2F0KG5wLmNsaXAoc2VsZi5zcGVlZCArIHJuZy5ub3JtYWwoMCwgMC4wMyksIDAuMSwgMC42KSkKICAgICAgICBzdGVlciA9IGZsb2F0KG5wLmNsaXAoc3RlZXIgKyBybmcubm9ybWFsKDAsIHNlbGYubm9pc2Vfc3RkKSwgLTEuMCwgMS4wKSkKICAgICAgICByZXR1cm4gbnAuYXJyYXkoW3ZlbCwgc3RlZXJdLCBkdHlwZT1ucC5mbG9hdDY0KQoKICAgIGRlZiByZXNldChzZWxmKToKICAgICAgICBzZWxmLnByZXZfZXJyb3IgPSAwLjAKCgpkZWYgcmVzaXplKGZyYW1lKToKICAgIGltcG9ydCBjdjIKICAgIHJldHVybiBjdjIucmVzaXplKGZyYW1lLCAoSU1HX1csIElNR19IKSwgaW50ZXJwb2xhdGlvbj1jdjIuSU5URVJfTElORUFSKQoKCmRlZiBjb2xsZWN0X3RvX2hkZjUob3V0X3BhdGgsIG5fdHJhbnNpdGlvbnMsIHNlZWQ9NDIsIG1heF9lcF9zdGVwcz00MDApOgogICAgZnJvbSBneW1fZHVja2lldG93bi5lbnZzIGltcG9ydCBEdWNraWV0b3duRW52CgogICAgUGF0aChvdXRfcGF0aCkucGFyZW50Lm1rZGlyKHBhcmVudHM9VHJ1ZSwgZXhpc3Rfb2s9VHJ1ZSkKCiAgICAjIFByZS1hbGxvY2F0ZSB0aGUgZnVsbCBIREY1IGZpbGUgb24gZGlzayDigJQgbm8gZGF0YSBoZWxkIGluIFJBTSBiZXlvbmQgb25lIGNodW5rLgogICAgd2l0aCBoNXB5LkZpbGUob3V0X3BhdGgsICd3JykgYXMgZjoKICAgICAgICBweF9kcyAgPSBmLmNyZWF0ZV9kYXRhc2V0KCdwaXhlbHMnLCAgICAgIHNoYXBlPShuX3RyYW5zaXRpb25zLCBJTUdfSCwgSU1HX1csIDMpLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgZHR5cGU9J3VpbnQ4JywgICBjaHVua3M9KFdSSVRFX0NIVU5LLCBJTUdfSCwgSU1HX1csIDMpLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgY29tcHJlc3Npb249J2d6aXAnLCBjb21wcmVzc2lvbl9vcHRzPTQpCiAgICAgICAgYWN0X2RzID0gZi5jcmVhdGVfZGF0YXNldCgnYWN0aW9uJywgICAgICBzaGFwZT0obl90cmFuc2l0aW9ucywgMiksCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBkdHlwZT0nZmxvYXQzMicsIGNodW5rcz0oV1JJVEVfQ0hVTkssIDIpKQogICAgICAgIGVwX2RzICA9IGYuY3JlYXRlX2RhdGFzZXQoJ2VwaXNvZGVfaWR4Jywgc2hhcGU9KG5fdHJhbnNpdGlvbnMsKSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGR0eXBlPSdpbnQzMicsICAgY2h1bmtzPShXUklURV9DSFVOSywpKQogICAgICAgIHN0X2RzICA9IGYuY3JlYXRlX2RhdGFzZXQoJ3N0ZXBfaWR4JywgICAgc2hhcGU9KG5fdHJhbnNpdGlvbnMsKSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGR0eXBlPSdpbnQzMicsICAgY2h1bmtzPShXUklURV9DSFVOSywpKQoKICAgICAgICBybmcgID0gbnAucmFuZG9tLmRlZmF1bHRfcm5nKHNlZWQpCiAgICAgICAgY3RybCA9IFBEQ29udHJvbGxlcigpCgogICAgICAgIGJ1Zl9weCAgPSBucC5lbXB0eSgoV1JJVEVfQ0hVTkssIElNR19ILCBJTUdfVywgMyksIGR0eXBlPSd1aW50OCcpCiAgICAgICAgYnVmX2FjdCA9IG5wLmVtcHR5KChXUklURV9DSFVOSywgMiksICAgICAgICAgICAgICAgIGR0eXBlPSdmbG9hdDMyJykKICAgICAgICBidWZfZXAgID0gbnAuZW1wdHkoKFdSSVRFX0NIVU5LLCksICAgICAgICAgICAgICAgICAgZHR5cGU9J2ludDMyJykKICAgICAgICBidWZfc3QgID0gbnAuZW1wdHkoKFdSSVRFX0NIVU5LLCksICAgICAgICAgICAgICAgICAgZHR5cGU9J2ludDMyJykKCiAgICAgICAgZXBfaWQgICAgID0gMAogICAgICAgIGNvbGxlY3RlZCA9IDAKICAgICAgICBidWZfcG9zICAgPSAwCgogICAgICAgIG1hcF9jeWNsZSA9IGxpc3QoTUFQUykgKiAobl90cmFuc2l0aW9ucyAvLyAobWF4X2VwX3N0ZXBzICogbGVuKE1BUFMpKSArIDIpCgogICAgICAgIHByaW50KGYnQ29sbGVjdGluZyB7bl90cmFuc2l0aW9uczosfSB0cmFuc2l0aW9ucyBmcm9tIHtsZW4oTUFQUyl9IG1hcHMgLi4uJykKICAgICAgICB0MCA9IHRpbWUudGltZSgpCgogICAgICAgIGRlZiBmbHVzaChzdGFydCwgY291bnQpOgogICAgICAgICAgICBweF9kc1tzdGFydDpzdGFydCtjb3VudF0gID0gYnVmX3B4Wzpjb3VudF0KICAgICAgICAgICAgYWN0X2RzW3N0YXJ0OnN0YXJ0K2NvdW50XSA9IGJ1Zl9hY3RbOmNvdW50XQogICAgICAgICAgICBlcF9kc1tzdGFydDpzdGFydCtjb3VudF0gID0gYnVmX2VwWzpjb3VudF0KICAgICAgICAgICAgc3RfZHNbc3RhcnQ6c3RhcnQrY291bnRdICA9IGJ1Zl9zdFs6Y291bnRdCiAgICAgICAgICAgIGYuZmx1c2goKQoKICAgICAgICBlbnYgICAgICAgICAgPSBOb25lCiAgICAgICAgY3VycmVudF9tYXAgID0gTm9uZQoKICAgICAgICB3aGlsZSBjb2xsZWN0ZWQgPCBuX3RyYW5zaXRpb25zOgogICAgICAgICAgICBtYXBfbmFtZSA9IG1hcF9jeWNsZVtlcF9pZCAlIGxlbihNQVBTKV0KICAgICAgICAgICAgZXBfc2VlZCAgPSBpbnQocm5nLmludGVnZXJzKDAsIDIqKjMxKSkKCiAgICAgICAgICAgICMgT25seSByZWNyZWF0ZSB0aGUgZW52IHdoZW4gdGhlIG1hcCBjaGFuZ2VzIOKAlCBhdm9pZHMgcGVyLWVwaXNvZGUKICAgICAgICAgICAgIyBHTCBjb250ZXh0IGNodXJuIHdoaWNoIGxlYWtzIG1lbW9yeSBhbmQgZXZlbnR1YWxseSBPT01zLgogICAgICAgICAgICBpZiBtYXBfbmFtZSAhPSBjdXJyZW50X21hcDoKICAgICAgICAgICAgICAgIGlmIGVudiBpcyBub3QgTm9uZToKICAgICAgICAgICAgICAgICAgICBlbnYuY2xvc2UoKQogICAgICAgICAgICAgICAgZW52ID0gRHVja2lldG93bkVudihzZWVkPWVwX3NlZWQsIG1hcF9uYW1lPW1hcF9uYW1lLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBkaXN0b3J0aW9uPUZhbHNlLCBtYXhfc3RlcHM9bWF4X2VwX3N0ZXBzKQogICAgICAgICAgICAgICAgY3VycmVudF9tYXAgPSBtYXBfbmFtZQoKICAgICAgICAgICAgZW52LnNlZWQoZXBfc2VlZCkKICAgICAgICAgICAgb2JzID0gZW52LnJlc2V0KCkKICAgICAgICAgICAgY3RybC5yZXNldCgpCiAgICAgICAgICAgIGVwX3N0ZXAgPSAwCgogICAgICAgICAgICB3aGlsZSBjb2xsZWN0ZWQgPCBuX3RyYW5zaXRpb25zIGFuZCBlcF9zdGVwIDwgbWF4X2VwX3N0ZXBzOgogICAgICAgICAgICAgICAgYnVmX3B4W2J1Zl9wb3NdICA9IHJlc2l6ZShvYnMpCiAgICAgICAgICAgICAgICBidWZfYWN0W2J1Zl9wb3NdID0gY3RybC5hY3Qob2JzLCBybmcpLmFzdHlwZShucC5mbG9hdDMyKQogICAgICAgICAgICAgICAgYnVmX2VwW2J1Zl9wb3NdICA9IGVwX2lkCiAgICAgICAgICAgICAgICBidWZfc3RbYnVmX3Bvc10gID0gZXBfc3RlcAoKICAgICAgICAgICAgICAgIG9icywgXywgZG9uZSwgXyA9IGVudi5zdGVwKGJ1Zl9hY3RbYnVmX3Bvc10pCiAgICAgICAgICAgICAgICBjb2xsZWN0ZWQgKz0gMQogICAgICAgICAgICAgICAgZXBfc3RlcCAgICs9IDEKICAgICAgICAgICAgICAgIGJ1Zl9wb3MgICArPSAxCgogICAgICAgICAgICAgICAgaWYgYnVmX3BvcyA9PSBXUklURV9DSFVOSzoKICAgICAgICAgICAgICAgICAgICBmbHVzaChjb2xsZWN0ZWQgLSBXUklURV9DSFVOSywgV1JJVEVfQ0hVTkspCiAgICAgICAgICAgICAgICAgICAgYnVmX3BvcyA9IDAKCiAgICAgICAgICAgICAgICBpZiBkb25lOgogICAgICAgICAgICAgICAgICAgIGJyZWFrCgogICAgICAgICAgICBlcF9pZCArPSAxCgogICAgICAgICAgICBlbGFwc2VkID0gdGltZS50aW1lKCkgLSB0MAogICAgICAgICAgICByYXRlICAgID0gY29sbGVjdGVkIC8gbWF4KGVsYXBzZWQsIDEpCiAgICAgICAgICAgIGV0YSAgICAgPSAobl90cmFuc2l0aW9ucyAtIGNvbGxlY3RlZCkgLyBtYXgocmF0ZSwgMSkKICAgICAgICAgICAgcHJpbnQoZicgIHtjb2xsZWN0ZWQ6NmR9L3tuX3RyYW5zaXRpb25zfSAgbWFwcz17bWFwX25hbWU6PDIwc30gIHtyYXRlOi4wZn0gdHIvcyAgRVRBIHtldGE6LjBmfXMnLAogICAgICAgICAgICAgICAgICBlbmQ9J1xyJywgZmx1c2g9VHJ1ZSkKCiAgICAgICAgaWYgZW52IGlzIG5vdCBOb25lOgogICAgICAgICAgICBlbnYuY2xvc2UoKQoKICAgICAgICAjIGZsdXNoIGFueSByZW1haW5pbmcgcGFydGlhbCBjaHVuawogICAgICAgIGlmIGJ1Zl9wb3MgPiAwOgogICAgICAgICAgICBmbHVzaChjb2xsZWN0ZWQgLSBidWZfcG9zLCBidWZfcG9zKQoKICAgICAgICBmLmF0dHJzWyduX2VwaXNvZGVzJ10gICAgPSBlcF9pZAogICAgICAgIGYuYXR0cnNbJ25fdHJhbnNpdGlvbnMnXSA9IG5fdHJhbnNpdGlvbnMKICAgICAgICBmLmF0dHJzWydpbWdfaCddICAgICAgICAgPSBJTUdfSAogICAgICAgIGYuYXR0cnNbJ2ltZ193J10gICAgICAgICA9IElNR19XCiAgICAgICAgZi5hdHRyc1snbWFwcyddICAgICAgICAgID0gJywnLmpvaW4oTUFQUykKCiAgICBzaXplX21iID0gUGF0aChvdXRfcGF0aCkuc3RhdCgpLnN0X3NpemUgLyAxZTYKICAgIHByaW50KGYnXG5Eb25lOiB7Y29sbGVjdGVkOix9IHRyYW5zaXRpb25zLCB7ZXBfaWR9IGVwaXNvZGVzICAoe3RpbWUudGltZSgpLXQwOi4xZn1zKScpCiAgICBwcmludChmJ1NhdmVkIOKGkiB7b3V0X3BhdGh9ICAoe3NpemVfbWI6LjFmfSBNQiknKQoKCmRlZiB1cGxvYWRfczMobG9jYWxfcGF0aCk6CiAgICBpbXBvcnQgYm90bzMKICAgIHMzID0gYm90bzMuY2xpZW50KCdzMycsIHJlZ2lvbl9uYW1lPSd1cy1lYXN0LTEnKQogICAgcHJpbnQoZidVcGxvYWRpbmcgdG8gczM6Ly97UzNfQlVDS0VUfS97UzNfREFUQV9LRVl9IC4uLicpCiAgICBzMy51cGxvYWRfZmlsZShzdHIobG9jYWxfcGF0aCksIFMzX0JVQ0tFVCwgUzNfREFUQV9LRVkpCiAgICBwcmludCgnVXBsb2FkIGNvbXBsZXRlLicpCgoKZGVmIG1haW4oKToKICAgIHBhcnNlciA9IGFyZ3BhcnNlLkFyZ3VtZW50UGFyc2VyKCkKICAgIHBhcnNlci5hZGRfYXJndW1lbnQoJy0tbi10cmFuc2l0aW9ucycsIHR5cGU9aW50LCBkZWZhdWx0PTEwMF8wMDApCiAgICBwYXJzZXIuYWRkX2FyZ3VtZW50KCctLW91dCcsICAgICAgICAgICBkZWZhdWx0PSdkYXRhL2R1Y2tpZXRvd25fMTAway5oNScpCiAgICBwYXJzZXIuYWRkX2FyZ3VtZW50KCctLXNlZWQnLCAgICAgICAgICB0eXBlPWludCwgZGVmYXVsdD00MikKICAgIHBhcnNlci5hZGRfYXJndW1lbnQoJy0tdXBsb2FkJywgICAgICAgIGFjdGlvbj0nc3RvcmVfdHJ1ZScpCiAgICBhcmdzID0gcGFyc2VyLnBhcnNlX2FyZ3MoKQoKICAgIGNvbGxlY3RfdG9faGRmNShhcmdzLm91dCwgYXJncy5uX3RyYW5zaXRpb25zLCBzZWVkPWFyZ3Muc2VlZCkKICAgIGlmIGFyZ3MudXBsb2FkOgogICAgICAgIHVwbG9hZF9zMyhhcmdzLm91dCkKCgppZiBfX25hbWVfXyA9PSAnX19tYWluX18nOgogICAgbWFpbigpCg=="
 
 USER_DATA=$(cat <<USERDATA
 #!/bin/bash
-set -uxo pipefail
+set -xo pipefail
 exec > >(tee /var/log/datagen.log | logger -t datagen) 2>&1
 
 echo "=== Duckietown datagen bootstrap (run ${RUN_ID}) ==="
 export HOME=/root
 export DEBIAN_FRONTEND=noninteractive
 
+# Write generate_data.py from embedded base64 — no S3 download needed
+echo "${PYBASE64}" | base64 -d > /tmp/generate_data.py
+
+
 # System deps (python3-opencv provides cv2 without pip conflict)
 apt-get update -q
 apt-get install -y -q libgl1 libglu1-mesa libglib2.0-0 xvfb python3-pip python3-opencv python3-h5py
 
-# gym-duckietown needs pyglet 1.5.x; install before duckietown-gym-daffy to pin it
+# gym-duckietown: pin pyglet first so daffy can't overwrite it
 pip3 install --no-cache-dir "pyglet==1.5.27"
 pip3 install --no-cache-dir "duckietown-gym-daffy"
 pip3 install --no-cache-dir boto3
@@ -52,45 +56,52 @@ DT_WORLD=\$(python3 -c "import duckietown_world,os;print(os.path.dirname(duckiet
 DT_GYM=\$(python3 -c "import gym_duckietown,os;print(os.path.dirname(gym_duckietown.__file__))")
 ln -sf "\${DT_WORLD}/data/gd1/maps" "\${DT_GYM}/maps" || true
 
-echo "=== Bootstrap complete, starting collection ==="
-
-# Download collection script
-aws s3 cp s3://${S3_BUCKET}/${SCRIPT_S3_KEY} /tmp/generate_data.py --region ${REGION}
+echo "=== Bootstrap complete — starting Xvfb and collection ==="
 
 # Start virtual display
 Xvfb :99 -screen 0 1024x768x24 &
-sleep 2
+sleep 3
 
-# Upload log to S3 every 5 minutes in the background so it's visible mid-run
+# Upload log every 5 min in background
 (while true; do
     sleep 300
     aws s3 cp /var/log/datagen.log \
-        s3://${S3_BUCKET}/logs/datagen_${RUN_ID}.log \
-        --region ${REGION} --quiet || true
+        s3:///lewm-datagen/logs/datagen_${RUN_ID}.log \
+        --region  --quiet || true
 done) &
-LOG_UPLOADER_PID=\$!
+LOG_PID=\$!
 
-# Collect and upload
+# Collect (no --upload flag; we upload from shell below for better error visibility)
 cd /tmp
 DISPLAY=:99 python3 generate_data.py \
     --n-transitions ${N_TRANSITIONS} \
-    --out /tmp/duckietown_100k.h5 \
-    --upload
+    --out /tmp/duckietown_100k.h5
 EXIT_CODE=\$?
+echo "=== Collection exit code: \${EXIT_CODE} ==="
 
-kill \$LOG_UPLOADER_PID 2>/dev/null || true
+kill \$LOG_PID 2>/dev/null || true
+
+if [ \${EXIT_CODE} -eq 0 ]; then
+    echo "=== Uploading dataset to s3:///data/duckietown_100k.h5 ==="
+    aws s3 cp /tmp/duckietown_100k.h5 \
+        s3:///data/duckietown_100k.h5 \
+        --region  || \
+    aws s3 cp /tmp/duckietown_100k.h5 \
+        s3:///lewm-datagen/data/duckietown_100k.h5 \
+        --region  || true
+fi
 
 # Final log upload
 aws s3 cp /var/log/datagen.log \
-    s3://${S3_BUCKET}/logs/datagen_${RUN_ID}.log \
-    --region ${REGION} || true
+    s3:///lewm-datagen/logs/datagen_${RUN_ID}.log \
+    --region  || true
 
-echo "=== Datagen finished (exit \${EXIT_CODE}) — shutting down ==="
+echo "=== Datagen done (exit \${EXIT_CODE}) — shutting down ==="
 shutdown -h now
 USERDATA
 )
 
-echo "==> Launching t3.medium spot instance (run_id=${RUN_ID}, n_transitions=${N_TRANSITIONS}) ..."
+echo "==> Launching t3.medium spot (run_id=${RUN_ID}, n_transitions=${N_TRANSITIONS}) ..."
 
 INSTANCE_ID=$(aws ec2 run-instances \
     --region "$REGION" \
@@ -107,15 +118,14 @@ INSTANCE_ID=$(aws ec2 run-instances \
     --output text)
 
 echo ""
-echo "==> Instance launched: $INSTANCE_ID"
-echo "==> Run ID: $RUN_ID"
+echo "==> Instance: $INSTANCE_ID  run_id: $RUN_ID"
 echo ""
-echo "Monitor:"
-echo "  Log (after ~5 min):"
-echo "    aws s3 cp s3://${S3_BUCKET}/logs/datagen_${RUN_ID}.log -"
+echo "Monitor log (after ~10 min):"
+echo "  aws s3 cp s3://${LOG_BUCKET}/lewm-datagen/logs/datagen_${RUN_ID}.log -"
 echo ""
-echo "  Dataset (when complete):"
-echo "    aws s3 ls s3://${S3_BUCKET}/data/duckietown_100k.h5"
+echo "Dataset (when complete):"
+echo "  aws s3 ls s3://${DATA_BUCKET}/data/duckietown_100k.h5"
+echo "  aws s3 ls s3://${LOG_BUCKET}/lewm-datagen/data/duckietown_100k.h5  # fallback"
 echo ""
-echo "  Instance status:"
-echo "    aws ec2 describe-instances --instance-ids $INSTANCE_ID --region $REGION --query 'Reservations[0].Instances[0].State.Name' --output text"
+echo "Instance status:"
+echo "  aws ec2 describe-instances --instance-ids $INSTANCE_ID --region $REGION --query 'Reservations[0].Instances[0].State.Name' --output text"
