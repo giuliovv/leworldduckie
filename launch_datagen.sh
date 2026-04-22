@@ -31,24 +31,28 @@ aws s3 cp "$(dirname "$0")/generate_data.py" "s3://${S3_BUCKET}/${SCRIPT_S3_KEY}
 
 USER_DATA=$(cat <<USERDATA
 #!/bin/bash
-set -euxo pipefail
+set -uxo pipefail
 exec > >(tee /var/log/datagen.log | logger -t datagen) 2>&1
 
 echo "=== Duckietown datagen bootstrap (run ${RUN_ID}) ==="
 export HOME=/root
 export DEBIAN_FRONTEND=noninteractive
 
-# System deps
+# System deps (python3-opencv provides cv2 without pip conflict)
 apt-get update -q
-apt-get install -y -q libgl1 libglu1-mesa libglib2.0-0 xvfb python3-pip python3-opencv
+apt-get install -y -q libgl1 libglu1-mesa libglib2.0-0 xvfb python3-pip python3-opencv python3-h5py
 
-# Python deps (pyglet 1.5.27 required by gym-duckietown)
-pip3 install -q "duckietown-gym-daffy" "pyglet==1.5.27" h5py boto3 opencv-python
+# gym-duckietown needs pyglet 1.5.x; install before duckietown-gym-daffy to pin it
+pip3 install --no-cache-dir "pyglet==1.5.27"
+pip3 install --no-cache-dir "duckietown-gym-daffy"
+pip3 install --no-cache-dir boto3
 
 # Symlink maps (duckietown_world -> gym_duckietown)
 DT_WORLD=\$(python3 -c "import duckietown_world,os;print(os.path.dirname(duckietown_world.__file__))")
 DT_GYM=\$(python3 -c "import gym_duckietown,os;print(os.path.dirname(gym_duckietown.__file__))")
 ln -sf "\${DT_WORLD}/data/gd1/maps" "\${DT_GYM}/maps" || true
+
+echo "=== Bootstrap complete, starting collection ==="
 
 # Download collection script
 aws s3 cp s3://${S3_BUCKET}/${SCRIPT_S3_KEY} /tmp/generate_data.py --region ${REGION}
