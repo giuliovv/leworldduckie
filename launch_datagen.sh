@@ -12,7 +12,7 @@ AMI_ID=ami-05e86b3611c60b0b4   # Ubuntu 22.04 LTS amd64 (2026-04-10)
 INSTANCE_TYPE=t3.medium          # 4 GB RAM — enough headroom for gym-duckietown GL
 INSTANCE_PROFILE=lewm-ec2-training
 SECURITY_GROUP=sg-03bbca875466eb52a
-SUBNET=subnet-0926809da94f51a24
+SUBNET=subnet-00ef452a9147da192  # us-east-1a (t3 not available in us-east-1e)
 S3_BUCKET=leworldduckie
 
 N_TRANSITIONS=100000
