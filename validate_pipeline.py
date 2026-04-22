@@ -29,7 +29,7 @@ SEED = 42
 # ── Config ────────────────────────────────────────────────────────────────────
 N_TRANSITIONS = 500
 DATA_PATH     = Path('data/duckietown_train.h5')
-EMBED_DIM     = 64
+EMBED_DIM     = 192  # ViT-Tiny hidden size
 HISTORY       = 3
 N_PREDS       = 1
 SEQ_LEN       = HISTORY + N_PREDS
@@ -229,7 +229,7 @@ print(f'  Train: {len(train_ds)} | Val: {len(val_ds)}')
 print(f'  pixels: {tuple(batch["pixels"].shape)}  action: {tuple(batch["action"].shape)}')
 
 
-# ── CNN Encoder ───────────────────────────────────────────────────────────────
+# ── Encoder: ViT-Tiny (transformers) with CNN fallback ────────────────────────
 
 class CNNEncoder(nn.Module):
     def __init__(self, in_channels=3, embed_dim=64):
@@ -246,9 +246,24 @@ class CNNEncoder(nn.Module):
         return type('Out', (), {'last_hidden_state': feat.unsqueeze(1)})()
 
 
+def make_encoder():
+    try:
+        from transformers import ViTConfig, ViTModel
+        cfg = ViTConfig(
+            hidden_size=192, num_hidden_layers=12, num_attention_heads=3,
+            image_size=224, patch_size=16, num_channels=3,
+        )
+        vit = ViTModel(cfg)
+        print('  Using ViT-Tiny encoder (transformers)')
+        return vit, 192
+    except Exception as e:
+        print(f'  ViT unavailable ({e}), falling back to CNN encoder')
+        return CNNEncoder(embed_dim=64), 64
+
+
 # ── Build JEPA model ──────────────────────────────────────────────────────────
 
-encoder        = CNNEncoder(embed_dim=EMBED_DIM)
+encoder, EMBED_DIM = make_encoder()
 projector      = MLP(EMBED_DIM, EMBED_DIM, EMBED_DIM)
 pred_proj      = MLP(EMBED_DIM, EMBED_DIM, EMBED_DIM)
 action_encoder = Embedder(input_dim=2, smoothed_dim=2, emb_dim=EMBED_DIM, mlp_scale=4)
@@ -349,16 +364,24 @@ with torch.no_grad():
 embs = torch.cat(embs)
 embs_norm = (embs - embs.mean(0)) / (embs.std(0) + 1e-8)
 
-U, S, Vt = torch.pca_lowrank(embs_norm, q=2)
-coords = (embs_norm @ Vt).numpy()
+try:
+    from sklearn.manifold import TSNE
+    coords = TSNE(n_components=2, perplexity=30, random_state=SEED).fit_transform(embs_norm.numpy())
+    viz_label = 't-SNE'
+    print(f'  Using t-SNE for visualisation')
+except ImportError:
+    U, S, Vt = torch.pca_lowrank(embs_norm, q=2)
+    coords = (embs_norm @ Vt).numpy()
+    viz_label = 'PCA'
+    print(f'  Using PCA for visualisation')
 
 fig, ax = plt.subplots(figsize=(6, 5))
 sc = ax.scatter(coords[:,0], coords[:,1], c=np.arange(len(coords))/len(coords),
                 cmap='viridis', alpha=0.6, s=12)
 plt.colorbar(sc, ax=ax, label='Timestep')
-ax.set_title('Latent Space (PCA)'); ax.set_xlabel('PC1'); ax.set_ylabel('PC2')
+ax.set_title(f'Latent Space ({viz_label})'); ax.set_xlabel(f'{viz_label}1'); ax.set_ylabel(f'{viz_label}2')
 plt.tight_layout(); plt.savefig('data/latent_space.png', dpi=100); plt.close()
-print(f'  PCA plot saved (embs shape: {embs.shape})')
+print(f'  {viz_label} plot saved (embs shape: {embs.shape})')
 
 
 # ── VoE ───────────────────────────────────────────────────────────────────────
