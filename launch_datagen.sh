@@ -57,6 +57,15 @@ aws s3 cp s3://${S3_BUCKET}/${SCRIPT_S3_KEY} /tmp/generate_data.py --region ${RE
 Xvfb :99 -screen 0 1024x768x24 &
 sleep 2
 
+# Upload log to S3 every 5 minutes in the background so it's visible mid-run
+(while true; do
+    sleep 300
+    aws s3 cp /var/log/datagen.log \
+        s3://${S3_BUCKET}/logs/datagen_${RUN_ID}.log \
+        --region ${REGION} --quiet || true
+done) &
+LOG_UPLOADER_PID=\$!
+
 # Collect and upload
 cd /tmp
 DISPLAY=:99 python3 generate_data.py \
@@ -65,7 +74,9 @@ DISPLAY=:99 python3 generate_data.py \
     --upload
 EXIT_CODE=\$?
 
-# Upload log
+kill \$LOG_UPLOADER_PID 2>/dev/null || true
+
+# Final log upload
 aws s3 cp /var/log/datagen.log \
     s3://${S3_BUCKET}/logs/datagen_${RUN_ID}.log \
     --region ${REGION} || true
