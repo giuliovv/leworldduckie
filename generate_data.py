@@ -23,15 +23,16 @@ import numpy as np
 import h5py
 from pathlib import Path
 
-S3_BUCKET   = 'test-854656252703'
-S3_DATA_KEY = 'lewm-duckietown/duckietown_100k.h5'
+S3_BUCKET   = 'leworldduckie'
+S3_DATA_KEY = 'data/duckietown_100k.h5'
 
 MAPS = [
     'small_loop', 'small_loop_cw', 'loop_empty',
     'straight_road', 'zigzag_dists', 'udem1',
 ]
 
-IMG_H, IMG_W = 120, 160   # resize from 480x640 to match training config
+IMG_H, IMG_W = 120, 160
+WRITE_CHUNK  = 1000  # flush to disk every N transitions
 
 
 class PDController:
@@ -44,7 +45,6 @@ class PDController:
         self.prev_error = 0.0
 
     def act(self, obs, rng):
-        # obs: (H, W, 3) uint8
         yellow = (obs[:, :, 0] > 170) & (obs[:, :, 1] > 150) & (obs[:, :, 2] < 100)
         cx = obs.shape[1] // 2
         if yellow.any():
@@ -63,83 +63,114 @@ class PDController:
 
 
 def resize(frame):
-    """Fast nearest-neighbour resize (H,W,3) → (IMG_H,IMG_W,3)."""
     import cv2
     return cv2.resize(frame, (IMG_W, IMG_H), interpolation=cv2.INTER_LINEAR)
 
 
-def collect(n_transitions, seed=42, max_ep_steps=400):
+def collect_to_hdf5(out_path, n_transitions, seed=42, max_ep_steps=400):
     from gym_duckietown.envs import DuckietownEnv
 
-    rng  = np.random.default_rng(seed)
-    ctrl = PDController()
-
-    pixels, actions, ep_idx_list, step_idx_list = [], [], [], []
-    ep_id = 0
-    ep_start = 0
-    collected = 0
-
-    map_cycle = list(MAPS) * (n_transitions // (max_ep_steps * len(MAPS)) + 2)
-
-    print(f'Collecting {n_transitions:,} transitions from {len(MAPS)} maps ...')
-    t0 = time.time()
-
-    while collected < n_transitions:
-        map_name = map_cycle[ep_id % len(MAPS)]
-        ep_seed  = int(rng.integers(0, 2**31))
-        env = DuckietownEnv(seed=ep_seed, map_name=map_name,
-                            distortion=False, max_steps=max_ep_steps)
-        obs = env.reset()
-        ctrl.reset()
-        ep_step = 0
-
-        while collected < n_transitions and ep_step < max_ep_steps:
-            frame = resize(obs)
-            action = ctrl.act(obs, rng)
-
-            pixels.append(frame)
-            actions.append(action.astype(np.float32))
-            ep_idx_list.append(ep_id)
-            step_idx_list.append(ep_step)
-
-            obs, _, done, _ = env.step(action)
-            collected += 1
-            ep_step   += 1
-
-            if done:
-                break
-
-        env.close()
-        ep_id    += 1
-        ep_start  = collected
-
-        elapsed = time.time() - t0
-        rate    = collected / max(elapsed, 1)
-        eta     = (n_transitions - collected) / max(rate, 1)
-        print(f'  {collected:6d}/{n_transitions}  maps={map_name:<20s}  {rate:.0f} tr/s  ETA {eta:.0f}s',
-              end='\r', flush=True)
-
-    print(f'\nDone: {collected:,} transitions, {ep_id} episodes  ({time.time()-t0:.1f}s)')
-    return (np.stack(pixels),
-            np.stack(actions),
-            np.array(ep_idx_list, dtype=np.int32),
-            np.array(step_idx_list, dtype=np.int32),
-            ep_id)
-
-
-def save_hdf5(out_path, pixels, actions, ep_idx, step_idx, n_episodes):
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Pre-allocate the full HDF5 file on disk — no data held in RAM beyond one chunk.
     with h5py.File(out_path, 'w') as f:
-        f.create_dataset('pixels',      data=pixels,   compression='gzip', compression_opts=4)
-        f.create_dataset('action',      data=actions)
-        f.create_dataset('episode_idx', data=ep_idx)
-        f.create_dataset('step_idx',    data=step_idx)
-        f.attrs['n_episodes']    = n_episodes
-        f.attrs['n_transitions'] = len(pixels)
-        f.attrs['img_h']         = pixels.shape[1]
-        f.attrs['img_w']         = pixels.shape[2]
+        px_ds  = f.create_dataset('pixels',      shape=(n_transitions, IMG_H, IMG_W, 3),
+                                  dtype='uint8',   chunks=(WRITE_CHUNK, IMG_H, IMG_W, 3),
+                                  compression='gzip', compression_opts=4)
+        act_ds = f.create_dataset('action',      shape=(n_transitions, 2),
+                                  dtype='float32', chunks=(WRITE_CHUNK, 2))
+        ep_ds  = f.create_dataset('episode_idx', shape=(n_transitions,),
+                                  dtype='int32',   chunks=(WRITE_CHUNK,))
+        st_ds  = f.create_dataset('step_idx',    shape=(n_transitions,),
+                                  dtype='int32',   chunks=(WRITE_CHUNK,))
+
+        rng  = np.random.default_rng(seed)
+        ctrl = PDController()
+
+        buf_px  = np.empty((WRITE_CHUNK, IMG_H, IMG_W, 3), dtype='uint8')
+        buf_act = np.empty((WRITE_CHUNK, 2),                dtype='float32')
+        buf_ep  = np.empty((WRITE_CHUNK,),                  dtype='int32')
+        buf_st  = np.empty((WRITE_CHUNK,),                  dtype='int32')
+
+        ep_id     = 0
+        collected = 0
+        buf_pos   = 0
+
+        map_cycle = list(MAPS) * (n_transitions // (max_ep_steps * len(MAPS)) + 2)
+
+        print(f'Collecting {n_transitions:,} transitions from {len(MAPS)} maps ...')
+        t0 = time.time()
+
+        def flush(start, count):
+            px_ds[start:start+count]  = buf_px[:count]
+            act_ds[start:start+count] = buf_act[:count]
+            ep_ds[start:start+count]  = buf_ep[:count]
+            st_ds[start:start+count]  = buf_st[:count]
+            f.flush()
+
+        env          = None
+        current_map  = None
+
+        while collected < n_transitions:
+            map_name = map_cycle[ep_id % len(MAPS)]
+            ep_seed  = int(rng.integers(0, 2**31))
+
+            # Only recreate the env when the map changes — avoids per-episode
+            # GL context churn which leaks memory and eventually OOMs.
+            if map_name != current_map:
+                if env is not None:
+                    env.close()
+                env = DuckietownEnv(seed=ep_seed, map_name=map_name,
+                                    distortion=False, max_steps=max_ep_steps)
+                current_map = map_name
+
+            env.seed(ep_seed)
+            obs = env.reset()
+            ctrl.reset()
+            ep_step = 0
+
+            while collected < n_transitions and ep_step < max_ep_steps:
+                buf_px[buf_pos]  = resize(obs)
+                buf_act[buf_pos] = ctrl.act(obs, rng).astype(np.float32)
+                buf_ep[buf_pos]  = ep_id
+                buf_st[buf_pos]  = ep_step
+
+                obs, _, done, _ = env.step(buf_act[buf_pos])
+                collected += 1
+                ep_step   += 1
+                buf_pos   += 1
+
+                if buf_pos == WRITE_CHUNK:
+                    flush(collected - WRITE_CHUNK, WRITE_CHUNK)
+                    buf_pos = 0
+
+                if done:
+                    break
+
+            ep_id += 1
+
+            elapsed = time.time() - t0
+            rate    = collected / max(elapsed, 1)
+            eta     = (n_transitions - collected) / max(rate, 1)
+            print(f'  {collected:6d}/{n_transitions}  maps={map_name:<20s}  {rate:.0f} tr/s  ETA {eta:.0f}s',
+                  end='\r', flush=True)
+
+        if env is not None:
+            env.close()
+
+        # flush any remaining partial chunk
+        if buf_pos > 0:
+            flush(collected - buf_pos, buf_pos)
+
+        f.attrs['n_episodes']    = ep_id
+        f.attrs['n_transitions'] = n_transitions
+        f.attrs['img_h']         = IMG_H
+        f.attrs['img_w']         = IMG_W
         f.attrs['maps']          = ','.join(MAPS)
-    print(f'Saved {len(pixels):,} transitions → {out_path}  ({Path(out_path).stat().st_size/1e6:.1f} MB)')
+
+    size_mb = Path(out_path).stat().st_size / 1e6
+    print(f'\nDone: {collected:,} transitions, {ep_id} episodes  ({time.time()-t0:.1f}s)')
+    print(f'Saved → {out_path}  ({size_mb:.1f} MB)')
 
 
 def upload_s3(local_path):
@@ -158,8 +189,7 @@ def main():
     parser.add_argument('--upload',        action='store_true')
     args = parser.parse_args()
 
-    pixels, actions, ep_idx, step_idx, n_ep = collect(args.n_transitions, seed=args.seed)
-    save_hdf5(args.out, pixels, actions, ep_idx, step_idx, n_ep)
+    collect_to_hdf5(args.out, args.n_transitions, seed=args.seed)
     if args.upload:
         upload_s3(args.out)
 
