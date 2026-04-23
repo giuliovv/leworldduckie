@@ -12,7 +12,7 @@ set -euo pipefail
 
 REGION=us-east-1
 AMI_ID=ami-05e86b3611c60b0b4          # Ubuntu 22.04 LTS (Python 3.10) — same as datagen
-INSTANCE_TYPE=c5.xlarge               # 4 vCPU / 8 GB RAM, CPU-optimised
+INSTANCE_TYPE=t3.medium               # 2 vCPU / 4 GB RAM — same as datagen, sufficient
 S3_BUCKET=leworldduckie
 INSTANCE_PROFILE=lewm-ec2-training
 SECURITY_GROUP=sg-03bbca875466eb52a
