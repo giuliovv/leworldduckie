@@ -22,10 +22,10 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 # ── Config ────────────────────────────────────────────────────────────────────
-S3_BUCKET     = 'test-854656252703'
-S3_DATA_KEY   = 'lewm-duckietown/duckietown_100k.h5'
-S3_RUNS_PREFIX = 'lewm-training/runs'
-S3_SCRIPT_KEY  = 'lewm-training/train.py'
+S3_BUCKET     = 'leworldduckie'
+S3_DATA_KEY   = 'data/duckietown_100k.h5'
+S3_RUNS_PREFIX = 'training/runs'
+S3_SCRIPT_KEY  = 'training/train.py'
 
 LEWM_DIR  = Path('/tmp/le-wm')
 DATA_PATH = Path('/tmp/duckietown_100k.h5')
@@ -43,6 +43,7 @@ BATCH_SIZE    = 128
 LR            = 5e-4
 SIGREG_W      = 0.09
 SEED          = 42
+LAG_FRAMES    = 4     # gym-duckietown PWM lag steps to skip per episode
 IMG_SIZE      = 224   # ViT-Tiny input size
 CKPT_EVERY    = 5     # save checkpoint every N epochs
 
@@ -85,23 +86,25 @@ def s3_append_jsonl(s3_key, obj):
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 class DuckietownH5Dataset(Dataset):
-    def __init__(self, path, num_steps=4, frameskip=1, img_size=None):
+    def __init__(self, path, num_steps=4, frameskip=1, img_size=None, skip_initial_steps=0):
         self.path      = path
         self.num_steps = num_steps
         self.frameskip = frameskip
         self.img_size  = img_size
 
         with h5py.File(path, 'r') as f:
-            self.ep_idx  = f['episode_idx'][:]
-            self.actions = f['action'][:]
-            self.n       = len(self.ep_idx)
+            self.ep_idx   = f['episode_idx'][:]
+            self.step_idx = f['step_idx'][:]
+            self.actions  = f['action'][:]
+            self.n        = len(self.ep_idx)
 
         window = num_steps * frameskip
         self.valid = []
         for ep in np.unique(self.ep_idx):
             ep_inds = np.where(self.ep_idx == ep)[0]
             for start in ep_inds[:max(1, len(ep_inds) - window + 1)]:
-                if start + window <= ep_inds[-1] + 1:
+                if (start + window <= ep_inds[-1] + 1 and
+                        self.step_idx[start] >= skip_initial_steps):
                     self.valid.append(start)
         self.valid = np.array(self.valid)
 
@@ -225,7 +228,8 @@ def main():
 
     encoder, img_size = make_encoder(EMBED_DIM)
     full_ds   = DuckietownH5Dataset(DATA_PATH, num_steps=SEQ_LEN,
-                                     frameskip=FRAMESKIP, img_size=img_size)
+                                     frameskip=FRAMESKIP, img_size=img_size,
+                                     skip_initial_steps=LAG_FRAMES)
     n_train   = int(0.9 * len(full_ds))
     n_val     = len(full_ds) - n_train
     train_ds, val_ds = random_split(full_ds, [n_train, n_val],
