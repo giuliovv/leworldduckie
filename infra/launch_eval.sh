@@ -54,13 +54,15 @@ apt-get install -y -q libgl1 libglu1-mesa libglib2.0-0 xvfb python3-pip \
 echo "apt done"
 
 # Python deps
+# Install numpy<2 first; re-pin after stable-worldmodel since it upgrades numpy back to 2.x
 pip3 install --no-cache-dir boto3                           && echo "boto3 ok"
-pip3 install --no-cache-dir "numpy<2.0.0"                   && echo "numpy ok"
+pip3 install --no-cache-dir "numpy<2.0.0"                   && echo "numpy<2 ok"
 pip3 install --no-cache-dir "pyglet==1.5.27"                && echo "pyglet ok"
 pip3 install --no-cache-dir "duckietown-gym-daffy"          && echo "daffy ok"
 pip3 install --no-cache-dir h5py                            && echo "h5py ok"
 pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && echo "torch ok"
 pip3 install --no-cache-dir "stable-worldmodel[train]"      && echo "stable-worldmodel ok"
+pip3 install --no-cache-dir "numpy<2.0.0"                   && echo "numpy<2 re-pinned ok"
 pip3 install --no-cache-dir einops imageio pillow           && echo "misc deps ok"
 
 # Patch duckietown_world pwm_dynamics (numpy array / float inhomogeneous list)
@@ -85,8 +87,8 @@ sleep 2
 echo "Xvfb started"
 export DISPLAY=:99
 
-# Download and run eval script
-aws s3 cp "s3://${S3_BUCKET}/evals/run_eval.py" /tmp/run_eval.py --region ${REGION}
+# Download eval script via boto3 (aws CLI not available on this AMI)
+python3 -c "import boto3; boto3.client('s3', region_name='${REGION}').download_file('${S3_BUCKET}', 'evals/run_eval.py', '/tmp/run_eval.py'); print('script download ok')"
 cd /tmp
 python3 run_eval.py \
     --run-id "${RUN_ID}" \
@@ -113,7 +115,7 @@ shutdown -h now
 USERDATA
 )
 
-echo "==> Requesting spot c5.xlarge (run_id=${RUN_ID}) ..."
+echo "==> Requesting spot t3.medium (run_id=${RUN_ID}) ..."
 
 INSTANCE_ID=$(aws ec2 run-instances \
     --region "$REGION" \
