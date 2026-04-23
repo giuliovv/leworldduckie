@@ -1,24 +1,56 @@
 # LeWorldModel on Gym-Duckietown
 
-Train [LeWM](https://arxiv.org/abs/2603.19312) (a JEPA-based world model) on duckietown lane-following data.
+Train [LeWM](https://arxiv.org/abs/2603.19312) (a JEPA-based world model) on duckietown lane-following data collected from the real `gym-duckietown` simulator.
 
-## What's in this repo
+## Repo layout
 
-| File | Description |
-|---|---|
-| `lewm_duckie.ipynb` | Main notebook — data, training, visualisation, VoE eval |
-| `collect_duckietown.py` | Standalone data collection script (local use) |
-| `validate_pipeline.py` | End-to-end pipeline validator (runs without Jupyter) |
-| `requirements.txt` | Python dependencies |
-| `data/` | Local outputs: HDF5 dataset, checkpoints, plots |
+```
+leworldduckie/
+├── lewm_duckie.ipynb        # main notebook — data, training, visualisation, VoE eval
+├── requirements.txt
+├── src/
+│   ├── generate_data.py     # EC2 data collection (real gym-duckietown, streams to HDF5)
+│   ├── collect_duckietown.py# local data collection (real env or synthetic mock fallback)
+│   ├── train.py             # LeWM training loop
+│   └── validate_pipeline.py # end-to-end validator (no Jupyter needed)
+├── infra/
+│   ├── launch_datagen.sh    # launch spot t3.medium to collect 100k transitions → S3
+│   └── launch_training.sh   # launch spot g4dn.xlarge to train → S3
+├── checkpoints/
+│   └── lewm_best.pt.zip     # latest best model weights
+└── data/                    # local outputs: HDF5 dataset, plots (gitignored)
+```
+
+## Dataset
+
+100k transitions collected on EC2 from the real `gym-duckietown` simulator (6 maps, PD lane-follower with Gaussian noise). Stored at:
+
+```
+s3://leworldduckie/data/duckietown_100k.h5   (1.87 GB)
+```
+
+Each transition: `pixels` (120×160×3 uint8) + `action` ([vel, steer] float32) + `episode_idx` + `step_idx`.
+
+To re-collect:
+
+```bash
+bash infra/launch_datagen.sh [--n-transitions 100000]
+# logs → s3://leworldduckie/logs/datagen_<run_id>.log
+```
+
+To download locally:
+
+```bash
+aws s3 cp s3://leworldduckie/data/duckietown_100k.h5 data/
+```
 
 ## Quick start (Google Colab)
 
 1. Open `lewm_duckie.ipynb` in Colab
-2. Set `IS_COLAB_OVERRIDE = True` in the first code cell (or it auto-detects)
-3. Run all cells — the data cell downloads the pre-built 100k dataset from S3 (~97 MB), then training runs for 50 epochs on GPU
+2. Set `IS_COLAB_OVERRIDE = True` in the first cell (or it auto-detects)
+3. Run all cells — the data cell downloads the dataset from S3 (~1.87 GB), then training runs for 50 epochs on GPU
 
-Key config variables in the Config cell:
+Key config variables:
 
 ```python
 N_TRANSITIONS = 100_000   # transitions in dataset
@@ -29,57 +61,38 @@ EMBED_DIM     = 192       # ViT-Tiny hidden size
 ## Architecture
 
 - **Encoder**: ViT-Tiny (Colab) or lightweight CNN (local)
-- **Predictor**: Autoregressive transformer over latent embeddings
+- **Predictor**: autoregressive transformer over latent embeddings
 - **Loss**: MSE prediction loss + SIGReg signature regularisation
 - **Data**: PD lane-follower + Gaussian noise → (120×160×3) RGB observations, (2,) actions
 
-## Dataset
-
-100k transitions pre-generated on EC2 using a procedural mock environment (no OpenGL needed). Stored on S3 and downloaded automatically by the notebook on Colab.
-
-**Why no real gym-duckietown?** `duckietown-gym-daffy` depends on `zuper_typing`, which crashes on Python 3.12 (`TypeError: cannot set 'repr' attribute of immutable type 'typing.TypeVar'`). The mock environment produces equivalent synthetic observations.
-
-### Refreshing the pre-signed URL
-
-The S3 download URL embedded in the notebook expires after 7 days. To regenerate it:
+## Training on EC2
 
 ```bash
-aws s3 presign s3://test-854656252703/lewm-duckietown/duckietown_100k.h5 --expires-in 604800
+bash infra/launch_training.sh [--epochs 50] [--run-id my_run]
+# artifacts → s3://leworldduckie/training/runs/<run_id>/
 ```
 
-Then update `DATA_URL` in the Config cell of `lewm_duckie.ipynb`.
+Artifacts written each epoch: `loss_curve.png`, `metrics.jsonl`, `checkpoint_latest.pt`, `checkpoint_best.pt`. `summary.json` written on completion.
 
-To re-upload a new dataset:
+Monitor mid-run:
 
 ```bash
-aws s3 cp /path/to/duckietown_100k.h5 s3://test-854656252703/lewm-duckietown/duckietown_100k.h5
+aws s3 cp s3://leworldduckie/training/runs/<run_id>/metrics.jsonl - | tail -5
+aws s3 presign s3://leworldduckie/training/runs/<run_id>/loss_curve.png --expires-in 3600
 ```
 
-## Local validation (EC2)
+## Local validation
 
 ```bash
-cd ~/leworldduckie
-source .venv/bin/activate
-python validate_pipeline.py
+python src/validate_pipeline.py
+# runs 500 transitions + 2 epochs, saves plots to data/
 ```
-
-Runs 500 transitions + 2 epochs and saves plots to `data/`. Expects `le-wm` cloned at `/home/ubuntu/le-wm`.
 
 ## Notebook sections
 
 1. **Setup & installs** — Colab-only pip installs, virtual display, le-wm clone
-2. **Data collection** — downloads from S3 (Colab) or runs mock env locally
+2. **Data collection** — downloads from S3 (Colab) or runs env locally
 3. **Dataset & model** — HDF5 dataloader, encoder, full JEPA model
 4. **Training loop** — AdamW + gradient clipping + AMP on GPU
 5. **Latent space** — t-SNE (Colab) or PCA (local) on learned embeddings
 6. **VoE evaluation** — inject random teleport, plot surprise signal
-
-## Local disk note
-
-The `.venv` directory (~840 MB) can be deleted after use and recreated with:
-
-```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-```
-
-Project files (notebook, scripts, data) are only ~200 KB.

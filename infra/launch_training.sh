@@ -3,7 +3,7 @@
 # Usage: bash launch_training.sh [--epochs N] [--run-id my_run]
 #
 # Re-launch anytime to start a new run (or resume with same --run-id).
-# Artifacts: s3://test-854656252703/lewm-training/runs/<run_id>/
+# Artifacts: s3://leworldduckie/training/runs/<run_id>/
 #   loss_curve.png   — updated every epoch
 #   metrics.jsonl    — loss per epoch
 #   checkpoint_latest.pt / checkpoint_best.pt
@@ -14,7 +14,7 @@ set -euo pipefail
 REGION=us-east-1
 AMI_ID=ami-09d0a18beb02cc7d4   # Deep Learning OSS Nvidia PyTorch 2.7 Ubuntu 22.04 (2026-04-19)
 INSTANCE_TYPE=g4dn.xlarge
-S3_BUCKET=test-854656252703
+S3_BUCKET=leworldduckie
 INSTANCE_PROFILE=lewm-ec2-training
 SECURITY_GROUP=sg-03bbca875466eb52a
 SUBNET=subnet-0926809da94f51a24
@@ -32,7 +32,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "==> Uploading train.py to S3 ..."
-aws s3 cp "$(dirname "$0")/train.py" "s3://${S3_BUCKET}/lewm-training/train.py" --region $REGION
+aws s3 cp "$(dirname "$0")/../src/train.py" "s3://${S3_BUCKET}/training/train.py" --region $REGION
 
 USER_DATA=$(cat <<USERDATA
 #!/bin/bash
@@ -47,7 +47,7 @@ export PATH="\$PATH:/usr/local/cuda/bin"
 pip install -q h5py einops matplotlib scikit-learn boto3 stable-worldmodel[train] 2>&1 | tail -5
 
 # Download training script from S3
-aws s3 cp s3://${S3_BUCKET}/lewm-training/train.py /tmp/train.py --region ${REGION}
+aws s3 cp s3://${S3_BUCKET}/training/train.py /tmp/train.py --region ${REGION}
 
 # Run training
 cd /tmp
@@ -56,7 +56,7 @@ EXIT_CODE=\$?
 
 # Upload logs to S3
 aws s3 cp /var/log/lewm-train.log \
-    s3://${S3_BUCKET}/lewm-training/runs/${RUN_ID}/instance.log \
+    s3://${S3_BUCKET}/training/runs/${RUN_ID}/instance.log \
     --region ${REGION} || true
 
 echo "=== Training finished (exit \${EXIT_CODE}) — shutting down ==="
@@ -75,7 +75,7 @@ INSTANCE_ID=$(aws ec2 run-instances \
     --subnet-id "$SUBNET" \
     --instance-market-options '{"MarketType":"spot","SpotOptions":{"SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}' \
     --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":50,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
-    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=lewm-training-${RUN_ID}},{Key=Project,Value=lewm}]" \
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=lewm-training-${RUN_ID}},{Key=Project,Value=leworldduckie}]" \
     --user-data "$USER_DATA" \
     --query 'Instances[0].InstanceId' \
     --output text)
@@ -85,13 +85,13 @@ echo "==> Run ID: $RUN_ID"
 echo ""
 echo "Monitor training:"
 echo "  Loss plot (refresh anytime):"
-echo "    aws s3 presign s3://${S3_BUCKET}/lewm-training/runs/${RUN_ID}/loss_curve.png --expires-in 3600"
+echo "    aws s3 presign s3://${S3_BUCKET}/training/runs/${RUN_ID}/loss_curve.png --expires-in 3600"
 echo ""
 echo "  Metrics JSONL:"
-echo "    aws s3 cp s3://${S3_BUCKET}/lewm-training/runs/${RUN_ID}/metrics.jsonl - | tail -5"
+echo "    aws s3 cp s3://${S3_BUCKET}/training/runs/${RUN_ID}/metrics.jsonl - | tail -5"
 echo ""
 echo "  Instance log (after completion):"
-echo "    aws s3 cp s3://${S3_BUCKET}/lewm-training/runs/${RUN_ID}/instance.log -"
+echo "    aws s3 cp s3://${S3_BUCKET}/training/runs/${RUN_ID}/instance.log -"
 echo ""
 echo "  Instance status:"
 echo "    aws ec2 describe-instances --instance-ids $INSTANCE_ID --region $REGION --query 'Reservations[0].Instances[0].State.Name' --output text"
