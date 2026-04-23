@@ -96,7 +96,10 @@ def collect_to_hdf5(out_path, n_transitions, seed=42, max_ep_steps=400):
         collected = 0
         buf_pos   = 0
 
-        map_cycle = list(MAPS) * (n_transitions // (max_ep_steps * len(MAPS)) + 2)
+        # Batch episodes by map: run all episodes for one map before switching.
+        # Cycling maps every episode recreates the GL context every ~400 steps
+        # which leaks memory and OOMs well before 100k transitions.
+        eps_per_map = max(1, n_transitions // max_ep_steps // len(MAPS) + 10)
 
         print(f'Collecting {n_transitions:,} transitions from {len(MAPS)} maps ...')
         t0 = time.time()
@@ -112,7 +115,7 @@ def collect_to_hdf5(out_path, n_transitions, seed=42, max_ep_steps=400):
         current_map  = None
 
         while collected < n_transitions:
-            map_name = map_cycle[ep_id % len(MAPS)]
+            map_name = MAPS[(ep_id // eps_per_map) % len(MAPS)]
             ep_seed  = int(rng.integers(0, 2**31))
 
             # Only recreate the env when the map changes — avoids per-episode
