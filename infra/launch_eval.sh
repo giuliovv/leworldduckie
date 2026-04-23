@@ -60,8 +60,9 @@ pip3 install --no-cache-dir "numpy<2.0.0"                   && echo "numpy<2 ok"
 pip3 install --no-cache-dir "pyglet==1.5.27"                && echo "pyglet ok"
 pip3 install --no-cache-dir "duckietown-gym-daffy"          && echo "daffy ok"
 pip3 install --no-cache-dir h5py                            && echo "h5py ok"
-pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && echo "torch ok"
 pip3 install --no-cache-dir "stable-worldmodel[train]"      && echo "stable-worldmodel ok"
+# Force CPU torch+torchvision — stable-worldmodel pulls in CUDA torchvision which breaks on CPU torch
+pip3 install --no-cache-dir --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cpu && echo "torch+torchvision cpu ok"
 pip3 install --no-cache-dir "numpy<2.0.0"                   && echo "numpy<2 re-pinned ok"
 pip3 install --no-cache-dir einops imageio pillow           && echo "misc deps ok"
 
