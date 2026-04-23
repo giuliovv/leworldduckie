@@ -84,9 +84,38 @@ def s3_append_jsonl(s3_key, obj):
                   Body=(existing + json.dumps(obj) + '\n').encode())
 
 
+def fetch_ckpt(path):
+    """Return local Path to a checkpoint. Accepts s3://bucket/key or a local path."""
+    if path.startswith('s3://'):
+        rest = path[5:]
+        bucket, key = rest.split('/', 1)
+        local = Path('/tmp') / f'init_{Path(key).name}'
+        log(f'Downloading init ckpt: {path}')
+        boto3.client('s3').download_file(bucket, key, str(local))
+        return local
+    return Path(path)
+
+
+def load_transferable_weights(model, ckpt_path):
+    """Load weights where name AND shape match. Returns a report dict.
+    Handles both raw state_dict saves and train.py's {'model': ..., ...} format.
+    """
+    ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    state = ckpt['model'] if isinstance(ckpt, dict) and 'model' in ckpt else ckpt
+    tgt = model.state_dict()
+    loaded    = {k: v for k, v in state.items() if k in tgt and tgt[k].shape == v.shape}
+    mismatch  = [k for k, v in state.items() if k in tgt and tgt[k].shape != v.shape]
+    extra     = [k for k in state if k not in tgt]
+    model.load_state_dict(loaded, strict=False)
+    return {'loaded': list(loaded), 'shape_mismatch': mismatch, 'extra_in_ckpt': extra}
+
+
 # ── Dataset ───────────────────────────────────────────────────────────────────
 class DuckietownH5Dataset(Dataset):
-    def __init__(self, path, num_steps=4, frameskip=1, img_size=None, skip_initial_steps=0):
+    """`in_memory=True` loads all pixels to RAM — huge speedup vs gzip re-read per sample."""
+
+    def __init__(self, path, num_steps=4, frameskip=1, img_size=None,
+                 skip_initial_steps=0, in_memory=True):
         self.path      = path
         self.num_steps = num_steps
         self.frameskip = frameskip
@@ -97,6 +126,12 @@ class DuckietownH5Dataset(Dataset):
             self.step_idx = f['step_idx'][:]
             self.actions  = f['action'][:]
             self.n        = len(self.ep_idx)
+            if in_memory:
+                log('Loading pixels to RAM ...')
+                self.pixels = f['pixels'][:]
+                log(f'  pixels in RAM: {self.pixels.nbytes / 1e9:.2f} GB')
+            else:
+                self.pixels = None
 
         window = num_steps * frameskip
         self.valid = []
@@ -115,8 +150,11 @@ class DuckietownH5Dataset(Dataset):
         start   = self.valid[idx]
         indices = np.arange(start, start + self.num_steps * self.frameskip, self.frameskip)
         indices = np.clip(indices, 0, self.n - 1)
-        with h5py.File(self.path, 'r') as f:
-            frames = f['pixels'][indices]
+        if self.pixels is not None:
+            frames = self.pixels[indices]
+        else:
+            with h5py.File(self.path, 'r') as f:
+                frames = f['pixels'][indices]
         actions = self.actions[indices]
         pixels  = torch.from_numpy(frames).float().permute(0, 3, 1, 2) / 255.0
         pixels  = pixels * 2.0 - 1.0
@@ -192,6 +230,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--run-id', default=datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S'))
     parser.add_argument('--epochs', type=int, default=N_EPOCHS)
+    parser.add_argument('--init-from', default=None,
+                        help='Warm-start weights from an s3:// URL or local path. '
+                             'Only shape-matching params are loaded (fresh optimizer/epoch). '
+                             'Ignored if this run_id already has a checkpoint (resume takes precedence).')
     args = parser.parse_args()
 
     run_id = args.run_id
@@ -235,22 +277,24 @@ def main():
     train_ds, val_ds = random_split(full_ds, [n_train, n_val],
                                      generator=torch.Generator().manual_seed(SEED))
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
-                               drop_last=True, num_workers=4, pin_memory=True)
+                               drop_last=True, num_workers=4, pin_memory=True,
+                               persistent_workers=True)
     val_loader   = DataLoader(val_ds,   batch_size=BATCH_SIZE, shuffle=False,
-                               drop_last=False, num_workers=4, pin_memory=True)
+                               drop_last=False, num_workers=4, pin_memory=True,
+                               persistent_workers=True)
     log(f'Dataset: {len(train_ds)} train / {len(val_ds)} val samples')
 
-    # ── Build model ───────────────────────────────────────────────────────────
+    # ── Build model (paper-sized, matches le-wm config/train/lewm.yaml) ───────
     hidden_dim     = EMBED_DIM
-    projector      = MLP(EMBED_DIM, hidden_dim, EMBED_DIM)
-    pred_proj      = MLP(hidden_dim, hidden_dim, EMBED_DIM)
+    projector      = MLP(EMBED_DIM, 2048, EMBED_DIM, norm_fn=nn.BatchNorm1d)
+    pred_proj      = MLP(hidden_dim, 2048, EMBED_DIM, norm_fn=nn.BatchNorm1d)
     action_encoder = Embedder(input_dim=ACTION_DIM, smoothed_dim=ACTION_DIM,
                                emb_dim=EMBED_DIM, mlp_scale=4)
     predictor      = ARPredictor(num_frames=HISTORY, input_dim=EMBED_DIM,
                                   hidden_dim=hidden_dim, output_dim=EMBED_DIM,
-                                  depth=2, heads=4, dim_head=16,
-                                  mlp_dim=hidden_dim * 2, dropout=0.1)
-    sigreg = SIGReg(knots=17, num_proj=512)
+                                  depth=6, heads=16, dim_head=64,
+                                  mlp_dim=2048, dropout=0.1)
+    sigreg = SIGReg(knots=17, num_proj=1024)
     model  = JEPA(encoder, predictor, action_encoder, projector, pred_proj)
     model  = model.to(device)
     sigreg = sigreg.to(device)
@@ -260,9 +304,9 @@ def main():
         list(model.parameters()) + list(sigreg.parameters()),
         lr=LR, weight_decay=1e-3,
     )
-    scaler = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
+    use_amp = device.type == 'cuda'  # bf16 autocast, no GradScaler (bf16 has fp32 dynamic range)
 
-    # ── Resume from checkpoint ────────────────────────────────────────────────
+    # ── Resume (same-arch) or warm-start (shape-aware) ───────────────────────
     start_epoch   = 1
     train_losses  = []
     val_losses    = []
@@ -283,6 +327,13 @@ def main():
         val_losses   = ckpt.get('val_losses', [])
         best_val     = ckpt.get('best_val', float('inf'))
         log(f'Resumed from epoch {ckpt["epoch"]}  best_val={best_val:.4f}')
+    elif args.init_from:
+        report = load_transferable_weights(model, fetch_ckpt(args.init_from))
+        log(f'Warm-start from {args.init_from}')
+        log(f'  Loaded: {len(report["loaded"])} params')
+        log(f'  Skipped (shape mismatch): {len(report["shape_mismatch"])} '
+            f'(e.g. {report["shape_mismatch"][:3]})')
+        log(f'  Extra in ckpt (not in model): {len(report["extra_in_ckpt"])}')
 
     # ── Training loop ─────────────────────────────────────────────────────────
     for epoch in range(start_epoch, args.epochs + 1):
@@ -291,24 +342,20 @@ def main():
         ep_train = []
         for batch in train_loader:
             optimizer.zero_grad()
-            if scaler:
-                with torch.amp.autocast('cuda'):
+            if use_amp:
+                with torch.autocast('cuda', dtype=torch.bfloat16):
                     loss, pl, sl = step_fn(batch, model, sigreg, device, dtype)
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
             else:
                 loss, pl, sl = step_fn(batch, model, sigreg, device, dtype)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
             ep_train.append(loss.item())
 
         model.eval()
         ep_val = []
-        with torch.no_grad():
+        val_ctx = torch.autocast('cuda', dtype=torch.bfloat16) if use_amp else torch.amp.autocast('cpu', enabled=False)
+        with torch.no_grad(), val_ctx:
             for batch in val_loader:
                 loss, _, _ = step_fn(batch, model, sigreg, device, dtype)
                 ep_val.append(loss.item())

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Launch a spot g4dn.xlarge to train LeWM, auto-shuts-down when done.
-# Usage: bash launch_training.sh [--epochs N] [--run-id my_run]
+# Usage: bash launch_training.sh [--epochs N] [--run-id my_run] [--init-from s3://.../ckpt.pt]
 #
 # Re-launch anytime to start a new run (or resume with same --run-id).
 # Artifacts: s3://leworldduckie/training/runs/<run_id>/
@@ -21,15 +21,22 @@ SUBNET=subnet-0926809da94f51a24
 
 EPOCHS=50
 RUN_ID=$(date -u +%Y%m%d_%H%M%S)
+INIT_FROM=""
 
 # parse optional args
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --epochs) EPOCHS=$2; shift 2 ;;
-        --run-id) RUN_ID=$2; shift 2 ;;
+        --epochs)    EPOCHS=$2; shift 2 ;;
+        --run-id)    RUN_ID=$2; shift 2 ;;
+        --init-from) INIT_FROM=$2; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
+
+INIT_FLAG=""
+if [[ -n "$INIT_FROM" ]]; then
+    INIT_FLAG="--init-from ${INIT_FROM}"
+fi
 
 echo "==> Uploading train.py to S3 ..."
 aws s3 cp "$(dirname "$0")/../src/train.py" "s3://${S3_BUCKET}/training/train.py" --region $REGION
@@ -51,7 +58,7 @@ aws s3 cp s3://${S3_BUCKET}/training/train.py /tmp/train.py --region ${REGION}
 
 # Run training
 cd /tmp
-python train.py --run-id ${RUN_ID} --epochs ${EPOCHS}
+python train.py --run-id ${RUN_ID} --epochs ${EPOCHS} ${INIT_FLAG}
 EXIT_CODE=\$?
 
 # Upload logs to S3

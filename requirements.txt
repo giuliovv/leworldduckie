@@ -1,7 +1,7 @@
 stable-worldmodel[train,env]
-duckietown-gym-daffy
 h5py
 einops
 matplotlib
 scikit-learn
 xvfbwrapper
+boto3
