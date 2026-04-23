@@ -212,8 +212,7 @@ def make_gif_frame(obs_frame, step, surprise_so_far, teleport_at, n_steps):
     ax.grid(True, alpha=0.25)
     plt.tight_layout(pad=0.4)
     fig.canvas.draw()
-    w, h = fig.canvas.get_width_height()
-    plot_arr = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8).reshape(h, w, 3)
+    plot_arr = np.asarray(fig.canvas.buffer_rgba())[:, :, :3]
     plt.close(fig)
     plot_img = Image.fromarray(plot_arr).resize((cam_w, cam_h), Image.BILINEAR)
 
