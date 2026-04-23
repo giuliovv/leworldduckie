@@ -83,28 +83,23 @@ def setup_duckietown():
         log('Maps symlinked')
 
 
-# ── PD controller ──────────────────────────────────────────────────────────────
-class PDController:
-    def __init__(self, kp=0.45, kd=0.25, noise_std=0.06, speed=0.35):
-        self.kp, self.kd, self.noise_std, self.speed = kp, kd, noise_std, speed
-        self.prev_error = 0.0
+# ── Lane-follow controller (ground-truth) ─────────────────────────────────────
+class LaneFollowController:
+    """Uses env.get_lane_pos2() for ground-truth lane offset + heading error."""
+    def __init__(self, k_lat=10.0, k_heading=5.0, speed=0.35,
+                 speed_noise=0.03, steer_noise=0.03):
+        self.k_lat, self.k_heading = k_lat, k_heading
+        self.speed, self.speed_noise, self.steer_noise = speed, speed_noise, steer_noise
 
-    def act(self, obs, rng):
-        yellow = (obs[:, :, 0] > 170) & (obs[:, :, 1] > 150) & (obs[:, :, 2] < 100)
-        cx = obs.shape[1] // 2
-        if yellow.any():
-            _, xs = np.where(yellow)
-            error = float((xs.mean() - cx) / cx)
-        else:
-            error = self.prev_error
-        steer = -(self.kp * error + self.kd * (error - self.prev_error))
-        self.prev_error = error
-        vel   = float(np.clip(self.speed + rng.normal(0, 0.03), 0.1, 0.6))
-        steer = float(np.clip(steer + rng.normal(0, self.noise_std), -1.0, 1.0))
+    def act(self, env, rng):
+        lp    = env.get_lane_pos2(env.cur_pos, env.cur_angle)
+        steer = self.k_lat * lp.dist + self.k_heading * lp.angle_rad
+        vel   = float(np.clip(self.speed + rng.normal(0, self.speed_noise), 0.1, 0.6))
+        steer = float(np.clip(steer + rng.normal(0, self.steer_noise), -1.0, 1.0))
         return np.array([vel, steer], dtype=np.float32)
 
     def reset(self):
-        self.prev_error = 0.0
+        pass
 
 
 # ── Model ──────────────────────────────────────────────────────────────────────
@@ -314,7 +309,7 @@ def main():
     from PIL import Image as PILImage
 
     rng  = np.random.default_rng(SEED)
-    ctrl = PDController()
+    ctrl = LaneFollowController()
     teleport_map = [m for m in MAPS if m != args.map][0]
 
     env = DuckietownEnv(seed=int(rng.integers(0, 2**31)), map_name=args.map,
@@ -342,7 +337,7 @@ def main():
             ctrl.reset()
 
         obs_r  = resize_obs(obs)
-        action = ctrl.act(obs_r, rng)
+        action = ctrl.act(env, rng)
         raw_frames.append(obs_r)
         raw_actions.append(action)
 

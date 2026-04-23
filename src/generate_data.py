@@ -35,31 +35,30 @@ IMG_H, IMG_W = 120, 160
 WRITE_CHUNK  = 1000  # flush to disk every N transitions
 
 
-class PDController:
-    """Simple PD lane-follower on the yellow centre line."""
-    def __init__(self, kp=0.45, kd=0.25, noise_std=0.06, speed=0.35):
-        self.kp = kp
-        self.kd = kd
-        self.noise_std = noise_std
-        self.speed = speed
-        self.prev_error = 0.0
+class LaneFollowController:
+    """Ground-truth lane follower using env.get_lane_pos2().
 
-    def act(self, obs, rng):
-        yellow = (obs[:, :, 0] > 170) & (obs[:, :, 1] > 150) & (obs[:, :, 2] < 100)
-        cx = obs.shape[1] // 2
-        if yellow.any():
-            _, xs = np.where(yellow)
-            error = (xs.mean() - cx) / cx
-        else:
-            error = self.prev_error
-        steer = -(self.kp * error + self.kd * (error - self.prev_error))
-        self.prev_error = error
-        vel   = float(np.clip(self.speed + rng.normal(0, 0.03), 0.1, 0.6))
-        steer = float(np.clip(steer + rng.normal(0, self.noise_std), -1.0, 1.0))
+    Uses the simulator's exact lane offset (dist) and heading error (angle_rad)
+    rather than pixel-level heuristics, producing clean, consistent trajectories.
+    Small Gaussian noise on both velocity and steering ensures data diversity.
+    """
+    def __init__(self, k_lat=10.0, k_heading=5.0, speed=0.35,
+                 speed_noise=0.03, steer_noise=0.03):
+        self.k_lat       = k_lat
+        self.k_heading   = k_heading
+        self.speed       = speed
+        self.speed_noise = speed_noise
+        self.steer_noise = steer_noise
+
+    def act(self, env, rng):
+        lp    = env.get_lane_pos2(env.cur_pos, env.cur_angle)
+        steer = self.k_lat * lp.dist + self.k_heading * lp.angle_rad
+        vel   = float(np.clip(self.speed + rng.normal(0, self.speed_noise), 0.1, 0.6))
+        steer = float(np.clip(steer + rng.normal(0, self.steer_noise), -1.0, 1.0))
         return np.array([vel, steer], dtype=np.float64)
 
     def reset(self):
-        self.prev_error = 0.0
+        pass
 
 
 def resize(frame):
@@ -85,7 +84,7 @@ def collect_to_hdf5(out_path, n_transitions, seed=42, max_ep_steps=400):
                                   dtype='int32',   chunks=(WRITE_CHUNK,))
 
         rng  = np.random.default_rng(seed)
-        ctrl = PDController()
+        ctrl = LaneFollowController()
 
         buf_px  = np.empty((WRITE_CHUNK, IMG_H, IMG_W, 3), dtype='uint8')
         buf_act = np.empty((WRITE_CHUNK, 2),                dtype='float32')
@@ -134,7 +133,7 @@ def collect_to_hdf5(out_path, n_transitions, seed=42, max_ep_steps=400):
 
             while collected < n_transitions and ep_step < max_ep_steps:
                 buf_px[buf_pos]  = resize(obs)
-                buf_act[buf_pos] = ctrl.act(obs, rng).astype(np.float32)
+                buf_act[buf_pos] = ctrl.act(env, rng).astype(np.float32)
                 buf_ep[buf_pos]  = ep_id
                 buf_st[buf_pos]  = ep_step
 
