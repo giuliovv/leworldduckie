@@ -99,6 +99,7 @@ s3.download_file('${S3_BUCKET}', '${GOAL_S3#s3://${S3_BUCKET}/}', '/tmp/mpc_goal
 print('goal ok')
 "
 
+mkdir -p /tmp/mpc_gifs
 cd /tmp
 DISPLAY=:99 python3 mpc_controller.py \
     --ckpt /tmp/lewm_best.pt \
@@ -108,6 +109,7 @@ DISPLAY=:99 python3 mpc_controller.py \
     --frameskip 1 \
     --lag-frames 4 \
     --gif /tmp/mpc_best_ep.gif \
+    --gif-all /tmp/mpc_gifs \
     --s3-progress s3://${S3_BUCKET}/evals/mpc/${RUN_ID}/progress.txt \
     --verbose \
     ${MAP_ARG} 2>&1 | tee /tmp/mpc_results.txt
@@ -129,6 +131,14 @@ for src, key in uploads:
         continue
     try:
         s3.upload_file(src, '${S3_BUCKET}', key)
+        print(f'uploaded {key}')
+    except Exception as e:
+        print(f'upload failed {key}: {e}', file=sys.stderr)
+import glob
+for gif in sorted(glob.glob('/tmp/mpc_gifs/ep*.gif')):
+    key = f'evals/mpc/${RUN_ID}/' + os.path.basename(gif)
+    try:
+        s3.upload_file(gif, '${S3_BUCKET}', key)
         print(f'uploaded {key}')
     except Exception as e:
         print(f'upload failed {key}: {e}', file=sys.stderr)

@@ -411,6 +411,8 @@ def main():
                     help='Save last episode video to this MP4 path')
     ap.add_argument('--gif',        default=None,
                     help='Save best episode (most steps, then reward) as GIF to this path')
+    ap.add_argument('--gif-all',    default=None,
+                    help='Directory to save a GIF for every episode (ep0.gif, ep1.gif, ...)')
     ap.add_argument('--s3-progress', default=None,
                     help='S3 URI (s3://bucket/key) to upload a progress summary after each episode')
     ap.add_argument('--verbose',    action='store_true')
@@ -456,10 +458,13 @@ def main():
     best_frames = []   # frames of the best episode so far
     best_key    = (-1, -float('inf'))  # (n_steps, mean_reward)
 
+    if args.gif_all:
+        import os; os.makedirs(args.gif_all, exist_ok=True)
+
     for ep in range(args.episodes):
         ep_seed = int(rng_env.integers(0, 2**31))
         record  = args.video and (ep == args.episodes - 1)
-        vframes = [] if (record or args.gif) else None
+        vframes = [] if (record or args.gif or args.gif_all) else None
 
         kw = dict(distortion=False, max_steps=args.steps + 20, seed=ep_seed)
         if args.map:
@@ -479,6 +484,15 @@ def main():
               f'{stats["mean_ms"]:.0f}ms/step')
 
         _upload_progress(all_stats)
+
+        if args.gif_all and vframes:
+            try:
+                import imageio, os
+                ep_path = os.path.join(args.gif_all, f'ep{ep}.gif')
+                imageio.mimwrite(ep_path, vframes, fps=10, loop=0)
+                print(f'  GIF → {ep_path}')
+            except Exception as e:
+                print(f'  ep GIF write failed: {e}')
 
         if record and vframes:
             try:
