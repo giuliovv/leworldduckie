@@ -19,14 +19,16 @@ SUBNET=subnet-00ef452a9147da192
 S3_BUCKET=leworldduckie
 
 RUN_ID=$(date -u +%Y%m%d_%H%M%S)
-CKPT="s3://${S3_BUCKET}/training/runs/notebook/checkpoint_best.pt"
+CKPT="s3://${S3_BUCKET}/training/runs/notebook/checkpoint_latest.pt"
+GOAL_S3="s3://${S3_BUCKET}/evals/mpc_goal.png"
 STEPS=300
 MAP_ARG=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --ckpt)  CKPT=$2;  shift 2 ;;
-        --steps) STEPS=$2; shift 2 ;;
+        --ckpt)  CKPT=$2;      shift 2 ;;
+        --goal)  GOAL_S3=$2;   shift 2 ;;
+        --steps) STEPS=$2;     shift 2 ;;
         --map)   MAP_ARG="--map $2"; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -85,7 +87,7 @@ Xvfb :99 -screen 0 1024x768x24 &
 sleep 2
 export DISPLAY=:99
 
-# Download script and checkpoint
+# Download script, checkpoint, and goal frame
 python3 -c "
 import boto3
 s3 = boto3.client('s3', region_name='${REGION}')
@@ -93,11 +95,14 @@ s3.download_file('${S3_BUCKET}', 'evals/mpc_controller.py', '/tmp/mpc_controller
 print('mpc_controller.py ok')
 s3.download_file('${S3_BUCKET}', '${CKPT#s3://${S3_BUCKET}/}', '/tmp/lewm_best.pt')
 print('checkpoint ok')
+s3.download_file('${S3_BUCKET}', '${GOAL_S3#s3://${S3_BUCKET}/}', '/tmp/mpc_goal.png')
+print('goal ok')
 "
 
 cd /tmp
 DISPLAY=:99 python3 mpc_controller.py \
     --ckpt /tmp/lewm_best.pt \
+    --goal /tmp/mpc_goal.png \
     --steps ${STEPS} \
     --episodes 10 \
     --frameskip 3 \
