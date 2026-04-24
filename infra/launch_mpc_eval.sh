@@ -21,15 +21,19 @@ S3_BUCKET=leworldduckie
 RUN_ID=$(date -u +%Y%m%d_%H%M%S)
 CKPT="s3://${S3_BUCKET}/training/runs/notebook/checkpoint_latest.pt"
 GOAL_S3="s3://${S3_BUCKET}/evals/mpc_goal.png"
+DATA_S3="s3://${S3_BUCKET}/data/duckietown_100k.h5"
+LATENT_INDEX_S3="s3://${S3_BUCKET}/evals/latent_index.npz"
 STEPS=300
 MAP_ARG=""
+GOAL_MODE="trajectory"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --ckpt)  CKPT=$2;      shift 2 ;;
-        --goal)  GOAL_S3=$2;   shift 2 ;;
-        --steps) STEPS=$2;     shift 2 ;;
-        --map)   MAP_ARG="--map $2"; shift 2 ;;
+        --ckpt)       CKPT=$2;        shift 2 ;;
+        --goal)       GOAL_S3=$2;     shift 2 ;;
+        --steps)      STEPS=$2;       shift 2 ;;
+        --map)        MAP_ARG="--map $2"; shift 2 ;;
+        --goal-mode)  GOAL_MODE=$2;   shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -104,6 +108,9 @@ cd /tmp
 DISPLAY=:99 python3 mpc_controller.py \
     --ckpt /tmp/lewm_best.pt \
     --goal /tmp/mpc_goal.png \
+    --goal-mode ${GOAL_MODE} \
+    --data-path ${DATA_S3} \
+    --latent-index ${LATENT_INDEX_S3} \
     --steps ${STEPS} \
     --episodes 10 \
     --frameskip 1 \

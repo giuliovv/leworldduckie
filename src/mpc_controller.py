@@ -173,19 +173,55 @@ class LatentIndex:
 
     def __init__(self, hdf5_path: str, model, device,
                  frameskip: int, lag_frames: int, cache_path: str = None):
-        if cache_path and Path(cache_path).exists():
-            d = np.load(cache_path)
+        local_cache = self._resolve_cache(cache_path)
+        if local_cache and Path(local_cache).exists():
+            d = np.load(local_cache)
             self.all_z    = d['all_z']     # (N, D) float32
             self.ep_idx   = d['ep_idx']    # (N,) int32
             self.step_idx = d['step_idx']  # (N,) int32
-            print(f'Loaded latent index ({len(self.all_z):,} frames) from {cache_path}')
+            print(f'Loaded latent index ({len(self.all_z):,} frames) from {local_cache}')
         else:
             self._build(hdf5_path, model, device, frameskip, lag_frames)
-            if cache_path:
-                np.savez(cache_path, all_z=self.all_z,
+            if local_cache:
+                np.savez(local_cache, all_z=self.all_z,
                          ep_idx=self.ep_idx, step_idx=self.step_idx)
-                print(f'Saved latent index → {cache_path}')
+                print(f'Saved latent index → {local_cache}')
+            # Upload to S3 if cache_path is an S3 URI (for future instances)
+            if cache_path and cache_path.startswith('s3://') and local_cache:
+                self._upload_cache(local_cache, cache_path)
         self._build_lookups()
+
+    @staticmethod
+    def _resolve_cache(cache_path):
+        """Return local path for cache (downloading from S3 if needed). None = no cache."""
+        if not cache_path:
+            return None
+        if not cache_path.startswith('s3://'):
+            return cache_path
+        # S3 cache: try to download
+        local = '/tmp/latent_index.npz'
+        try:
+            import boto3
+            from urllib.parse import urlparse
+            u = urlparse(cache_path)
+            boto3.client('s3', region_name='us-east-1').download_file(
+                u.netloc, u.path.lstrip('/'), local)
+            print(f'Downloaded latent index from {cache_path}')
+            return local
+        except Exception:
+            return local  # doesn't exist yet; will be built and saved here
+
+    @staticmethod
+    def _upload_cache(local_path, s3_uri):
+        try:
+            import boto3
+            from urllib.parse import urlparse
+            u = urlparse(s3_uri)
+            boto3.client('s3', region_name='us-east-1').upload_file(
+                local_path, u.netloc, u.path.lstrip('/'))
+            print(f'Uploaded latent index → {s3_uri}')
+        except Exception as e:
+            print(f'Latent index S3 upload failed: {e}')
 
     def _build(self, hdf5_path, model, device, frameskip, lag_frames):
         import h5py
@@ -202,31 +238,33 @@ class LatentIndex:
 
         print(f'Building latent index from {hdf5_path} ...')
         with h5py.File(hdf5_path, 'r') as f:
-            pixels    = f['pixels'][:]        # (N, 120, 160, 3) uint8
-            ep_all    = f['episode_idx'][:]   # (N,) int32
-            step_all  = f['step_idx'][:]      # (N,) int32
+            ep_all   = f['episode_idx'][:]   # (N,) int32 — small, load fully
+            step_all = f['step_idx'][:]      # (N,) int32 — small, load fully
+            n_total  = len(ep_all)
 
-        fs = max(frameskip, 1)
-        valid = np.where(
-            (step_all >= lag_frames) &
-            ((step_all - lag_frames) % fs == 0)
-        )[0]
-        print(f'  {len(pixels):,} total → {len(valid):,} valid after lag={lag_frames}/skip={fs}')
+            fs = max(frameskip, 1)
+            valid = np.where(
+                (step_all >= lag_frames) &
+                ((step_all - lag_frames) % fs == 0)
+            )[0]
+            print(f'  {n_total:,} total → {len(valid):,} valid after lag={lag_frames}/skip={fs}')
 
-        all_z = []
-        B = 128
-        with torch.no_grad():
-            for i in range(0, len(valid), B):
-                idx = valid[i:i + B]
-                px = torch.from_numpy(pixels[idx].astype(np.float32) / 255.0)\
-                         .permute(0, 3, 1, 2)
-                px = F.interpolate(px, size=(IMG_SIZE, IMG_SIZE),
-                                   mode='bilinear', align_corners=False)
-                px = (px * 2.0 - 1.0).to(device)
-                z = model.encode({'pixels': px.unsqueeze(1)})['emb'][:, 0]
-                all_z.append(z.cpu().numpy())
-                if (i // B) % 100 == 0:
-                    print(f'  {min(i + B, len(valid))}/{len(valid)} frames encoded...')
+            # Stream pixels in batches to avoid loading the full dataset into RAM
+            all_z = []
+            B = 64
+            with torch.no_grad():
+                for i in range(0, len(valid), B):
+                    idx = valid[i:i + B]
+                    px = torch.from_numpy(
+                        f['pixels'][idx].astype(np.float32) / 255.0
+                    ).permute(0, 3, 1, 2)
+                    px = F.interpolate(px, size=(IMG_SIZE, IMG_SIZE),
+                                       mode='bilinear', align_corners=False)
+                    px = (px * 2.0 - 1.0).to(device)
+                    z = model.encode({'pixels': px.unsqueeze(1)})['emb'][:, 0]
+                    all_z.append(z.cpu().numpy())
+                    if (i // B) % 200 == 0:
+                        print(f'  {min(i + B, len(valid))}/{len(valid)} frames encoded...')
 
         self.all_z    = np.concatenate(all_z).astype(np.float32)
         self.ep_idx   = ep_all[valid].astype(np.int32)
