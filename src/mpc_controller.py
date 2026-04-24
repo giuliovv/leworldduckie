@@ -26,7 +26,9 @@ LEWM_DIR   = Path('/home/ubuntu/le-wm') if Path('/home/ubuntu/le-wm').exists() \
 IMG_SIZE   = 224
 EMBED_DIM  = 192
 ACTION_DIM = 2
-HISTORY    = 3   # predictor context window
+HISTORY    = 3   # predictor context window (= notebook HISTORY)
+FRAMESKIP  = 3   # env steps per predictor step (= notebook FRAMESKIP on Colab)
+LAG_FRAMES = 4   # duckietown PWM warm-up steps to discard at episode start
 
 # Action bounds: [velocity, steering]
 ACT_LO = np.array([0.1, -1.0], dtype=np.float32)
@@ -255,12 +257,30 @@ def run_episode(model, z_goal, env, ep_idx: int, args, device,
                 video_frames=None) -> dict:
     """
     Run one episode.  Returns dict with success, n_steps, mean_reward, mean_ms.
-    Appends raw obs frames to video_frames list if provided.
+
+    Frameskip: each planning step executes the chosen action for args.frameskip
+    raw env steps, matching the training dataset which sampled every 3rd frame.
+    The context buffer is updated once per planning step (not per raw step).
+
+    Lag frames: the first args.lag_frames raw steps use LaneFollower without
+    filling the context buffer, matching the dataset's skip_initial_steps=LAG_FRAMES.
     """
     rng  = np.random.default_rng(args.seed + ep_idx)
     obs  = env.reset()
     if isinstance(obs, tuple):
         obs = obs[0]
+
+    # --- Burn through PWM lag frames (not stored in context) ---
+    early_done = False
+    for _ in range(args.lag_frames):
+        action = _lane_follow(env, rng)
+        for _ in range(args.frameskip):
+            result = env.step(action)
+            obs, _, early_done = result[0], result[1], result[2]
+            if early_done:
+                break
+        if early_done:
+            break
 
     frame_buf  = deque(maxlen=HISTORY)     # preprocessed (3, 224, 224) tensors
     action_buf = deque(maxlen=HISTORY)     # raw (2,) numpy actions
@@ -280,7 +300,7 @@ def run_episode(model, z_goal, env, ep_idx: int, args, device,
         frame_buf.append(px)
 
         if len(frame_buf) < HISTORY:
-            # Warm-up: collect real frames before we can form a full context
+            # Warm-up: collect real context frames before MPC can run
             action = _lane_follow(env, rng)
         else:
             # Encode context frames once (reused across all CEM iterations)
@@ -316,10 +336,19 @@ def run_episode(model, z_goal, env, ep_idx: int, args, device,
         action = np.clip(action, ACT_LO, ACT_HI).astype(np.float32)
         action_buf.append(action)
 
-        result = env.step(action)
-        obs, reward, done = result[0], result[1], result[2]
+        # Execute action for FRAMESKIP raw env steps; observe after last step.
+        # Matches training: dataset[i].action = action at raw step i*frameskip,
+        # which caused the transition to the frame at raw step (i+1)*frameskip.
+        total_reward = 0.0
+        for _ in range(args.frameskip):
+            result = env.step(action)
+            obs, rew, done = result[0], result[1], result[2]
+            total_reward += float(rew)
+            if done:
+                break
+        reward = total_reward
 
-        rewards.append(float(reward))
+        rewards.append(reward)
         step_times.append(time.time() - t0)
 
         if args.verbose:
@@ -364,8 +393,12 @@ def main():
                     help='HDF5 dataset (used for auto goal selection)')
     ap.add_argument('--map',        default=None,
                     help='Duckietown map name. Randomized per episode if omitted.')
+    ap.add_argument('--frameskip',   type=int, default=FRAMESKIP,
+                    help='Raw env steps per planning step (must match training)')
+    ap.add_argument('--lag-frames', type=int, default=LAG_FRAMES,
+                    help='Initial PWM-lag env steps to discard (must match training)')
     ap.add_argument('--steps',      type=int, default=300,
-                    help='Max steps per episode')
+                    help='Max planning steps per episode (each = frameskip raw steps)')
     ap.add_argument('--episodes',   type=int, default=1)
     ap.add_argument('--horizon',    type=int, default=10,
                     help='CEM planning horizon')
