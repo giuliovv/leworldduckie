@@ -78,15 +78,28 @@ aws s3 cp s3://leworldduckie/evals/mpc/<run_id>/progress.txt -
 
 ## Eval Results
 
-### Run 20260424_140919 (FRAMESKIP=1, checkpoint from bad PDController data)
+### Run 20260424_153252 (FRAMESKIP=1, vel_weight=1.0, steer_weight=0.1, PDController checkpoint)
+
+```
+0/10 episodes successful
+Best: ep=7, 103 steps, reward=-10.1
+Mean: 48.7 steps, reward=-36.6
+Typical: goes straight, does not follow lane
+```
+
+Velocity reward added (`vel_weight=1.0`) broke the spinning local minimum — agent now moves forward instead of spinning. However, it just goes straight regardless of lane geometry: confirmed by inspecting GIFs.
+
+`z_dist` diagnostic showed ~20-21 and **increasing** throughout every episode. This is not a local-minimum issue — it means the agent is drifting away from the goal latent, i.e. the PDController checkpoint's latent representations are too poor to guide the planner at all. The vel_weight fix is masking the underlying model quality problem by pushing the agent forward with no latent guidance.
+
+Root cause: checkpoint trained on old `PDController` data (not `LaneFollowController`).
+
+### Run 20260424_140919 (FRAMESKIP=1, PDController checkpoint, no vel reward)
 
 ```
 0/10 episodes successful
 Best: ep=6, 88 steps, reward=-10.7
-Typical: spinning in circles, not following lane
+Typical: spinning in circles
 ```
-
-Root cause: checkpoint was trained on data collected with old `PDController` (not `LaneFollowController`). The FRAMESKIP fix is correct but the checkpoint needs retraining with the right data and FRAMESKIP=1.
 
 ### Previous runs (FRAMESKIP=3)
 
