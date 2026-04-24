@@ -172,6 +172,8 @@ def cem_plan(
     n_samples: int = 200,
     n_iters: int = 3,
     warm_start=None,              # (horizon, 2) | None
+    vel_weight: float = 1.0,      # reward for forward velocity (breaks spinning local min)
+    steer_weight: float = 0.1,    # penalise large steering
 ) -> torch.Tensor:
     """
     Cross-Entropy Method planning.
@@ -225,11 +227,14 @@ def cem_plan(
 
         pred_embs = torch.stack(pred_embs, dim=1)  # (N, horizon, D)
 
-        # Cost: sum of per-step MSE to goal + action-smoothness penalty
-        traj_cost = (pred_embs - z_goal_exp).pow(2).mean(dim=-1).sum(dim=-1)  # (N,)
-        smooth    = 0.01 * (candidates[:, 1:] - candidates[:, :-1]).pow(2)\
-                          .sum(dim=(-1, -2))                                    # (N,)
-        costs = traj_cost + smooth
+        # Cost: latent MSE to goal + smoothness + action prior
+        traj_cost   = (pred_embs - z_goal_exp).pow(2).mean(dim=-1).sum(dim=-1)  # (N,)
+        smooth      = 0.01 * (candidates[:, 1:] - candidates[:, :-1]).pow(2)\
+                            .sum(dim=(-1, -2))                                    # (N,)
+        # vel_weight rewards forward progress; steer_weight penalises spinning
+        vel_reward  = vel_weight  * candidates[:, :, 0].mean(dim=-1)             # (N,)
+        steer_cost  = steer_weight * candidates[:, :, 1].abs().mean(dim=-1)      # (N,)
+        costs = traj_cost + smooth - vel_reward + steer_cost
 
         # Refit distribution with top-K elite samples
         _, idx   = torch.topk(costs, elite_k, largest=False)
@@ -288,6 +293,7 @@ def run_episode(model, z_goal, env, ep_idx: int, args, device,
 
     rewards    = []
     step_times = []
+    z_dist     = 0.0
     done       = False
 
     for step in range(args.steps):
@@ -326,10 +332,13 @@ def run_episode(model, z_goal, env, ep_idx: int, args, device,
                 fwd = torch.tensor([[0.35, 0.0]], device=device)
                 ws  = torch.cat([warm_start[1:], fwd], dim=0)
 
+            z_dist = (ctx_embs[-1] - z_goal).norm().item()
+
             plan = cem_plan(
                 model, ctx_embs, ctx_act_past, z_goal, device,
                 horizon=args.horizon, n_samples=args.n_samples,
-                n_iters=args.n_iters, warm_start=ws)
+                n_iters=args.n_iters, warm_start=ws,
+                vel_weight=args.vel_weight, steer_weight=args.steer_weight)
             warm_start = plan
             action     = plan[0].cpu().numpy()
 
@@ -352,16 +361,17 @@ def run_episode(model, z_goal, env, ep_idx: int, args, device,
         step_times.append(time.time() - t0)
 
         if args.verbose:
+            zdist_str = f' z_dist={z_dist:.3f}' if step >= HISTORY else ''
             try:
                 lp = env.get_lane_pos2(env.cur_pos, env.cur_angle)
                 print(f'  ep={ep_idx} t={step:3d} r={reward:.3f} '
                       f'lane_off={lp.dist:.3f} '
-                      f'a=[{action[0]:.2f},{action[1]:+.2f}] '
-                      f'{step_times[-1]*1e3:.0f}ms')
+                      f'a=[{action[0]:.2f},{action[1]:+.2f}]'
+                      f'{zdist_str} {step_times[-1]*1e3:.0f}ms')
             except Exception:
                 print(f'  ep={ep_idx} t={step:3d} r={reward:.3f} '
-                      f'a=[{action[0]:.2f},{action[1]:+.2f}] '
-                      f'{step_times[-1]*1e3:.0f}ms')
+                      f'a=[{action[0]:.2f},{action[1]:+.2f}]'
+                      f'{zdist_str} {step_times[-1]*1e3:.0f}ms')
 
         if done:
             break
@@ -406,6 +416,10 @@ def main():
                     help='CEM action samples per iteration')
     ap.add_argument('--n-iters',    type=int, default=3,
                     help='CEM refinement iterations')
+    ap.add_argument('--vel-weight',   type=float, default=1.0,
+                    help='Reward weight for forward velocity in CEM cost (breaks spinning)')
+    ap.add_argument('--steer-weight', type=float, default=0.1,
+                    help='Penalty weight for large steering in CEM cost')
     ap.add_argument('--seed',       type=int, default=42)
     ap.add_argument('--video',      default=None,
                     help='Save last episode video to this MP4 path')
