@@ -78,6 +78,17 @@ aws s3 cp s3://leworldduckie/evals/mpc/<run_id>/progress.txt -
 
 ## Eval Results
 
+### Run 20260424_180243 (FRAMESKIP=1, vel_weight=1.0, colab_v1 checkpoint — LaneFollowController data)
+
+```
+0/10 episodes successful
+Best: ep=7, 234 steps, reward=-4.163
+Mean: 63.7 steps, reward=-37.376
+```
+
+Significant improvement over previous runs with the new checkpoint trained on `LaneFollowController` data.
+Best episode survived 234 steps (vs 103 with PDController checkpoint). z_dist behaviour is still high (~20-22) and generally increasing, but ep=5 showed z_dist starting at ~16.4 and briefly decreasing — the first sign of partial latent guidance. The planner still doesn't converge to the goal but the representations are meaningfully better.
+
 ### Run 20260424_153252 (FRAMESKIP=1, vel_weight=1.0, steer_weight=0.1, PDController checkpoint)
 
 ```
