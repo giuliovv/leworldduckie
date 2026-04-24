@@ -173,7 +173,7 @@ def cem_plan(
     n_iters: int = 3,
     warm_start=None,              # (horizon, 2) | None
     vel_weight: float = 1.0,      # reward for forward velocity (breaks spinning local min)
-    steer_weight: float = 0.1,    # penalise large steering
+    steer_weight: float = 0.0,    # penalise large steering (0 = disabled)
 ) -> torch.Tensor:
     """
     Cross-Entropy Method planning.
@@ -418,8 +418,8 @@ def main():
                     help='CEM refinement iterations')
     ap.add_argument('--vel-weight',   type=float, default=1.0,
                     help='Reward weight for forward velocity in CEM cost (breaks spinning)')
-    ap.add_argument('--steer-weight', type=float, default=0.1,
-                    help='Penalty weight for large steering in CEM cost')
+    ap.add_argument('--steer-weight', type=float, default=0.0,
+                    help='Penalty weight for large steering in CEM cost (default 0 = disabled)')
     ap.add_argument('--seed',       type=int, default=42)
     ap.add_argument('--video',      default=None,
                     help='Save last episode video to this MP4 path')
