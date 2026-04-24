@@ -88,6 +88,22 @@ python src/validate_pipeline.py
 # runs 500 transitions + 2 epochs, saves plots to data/
 ```
 
+## Known limitations
+
+### Policy-entangled dynamics (MPC distribution shift)
+
+During data collection the `LaneFollowController` applies a **new action at every raw env step**. With `FRAMESKIP=3` the dataset stores `(z_t, a_t, z_{t+3})` pairs, but the three intervening env steps were actually driven by `a_{t+1}` and `a_{t+2}` from the PD controller. The predictor therefore learns:
+
+```
+E[z_{t+3} | z_t, a_t,  policy applies a_{t+1}, a_{t+2}]
+```
+
+At MPC time the agent **holds `a_t` constant** for all 3 raw steps (frameskip loop). This is out-of-distribution: the predictor has never seen a trajectory where the same action is repeated three times in a row. The rollout is biased in a way that depends on how similar the planned action is to the PD policy's response.
+
+**Impact**: the predictor will still work — the bias is subtle, not catastrophic — but rollout accuracy is degraded compared to a policy that was collected under the same repeat-action assumption.
+
+**Future work**: re-collect with a controller that repeats each sampled action for `FRAMESKIP` raw steps before recording (action-repeat data collection), then retrain and compare eval metrics to the current baseline.
+
 ## Notebook sections
 
 1. **Setup & installs** — Colab-only pip installs, virtual display, le-wm clone
