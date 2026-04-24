@@ -15,7 +15,7 @@ AMI_ID=ami-05e86b3611c60b0b4
 INSTANCE_TYPE=t3.medium
 INSTANCE_PROFILE=lewm-ec2-training
 SECURITY_GROUP=sg-03bbca875466eb52a
-SUBNET=subnet-00ef452a9147da192
+SUBNET=subnet-01497e4f428a93b98
 S3_BUCKET=leworldduckie
 
 RUN_ID=$(date -u +%Y%m%d_%H%M%S)
@@ -105,21 +105,28 @@ DISPLAY=:99 python3 mpc_controller.py \
     --goal /tmp/mpc_goal.png \
     --steps ${STEPS} \
     --episodes 10 \
-    --frameskip 3 \
+    --frameskip 1 \
     --lag-frames 4 \
+    --gif /tmp/mpc_best_ep.gif \
+    --s3-progress s3://${S3_BUCKET}/evals/mpc/${RUN_ID}/progress.txt \
     --verbose \
     ${MAP_ARG} 2>&1 | tee /tmp/mpc_results.txt
 EXIT_CODE=\${PIPESTATUS[0]}
 echo "python exit \${EXIT_CODE}"
 
-# Upload results and log
+# Upload results, GIF, and log
 python3 -c "
-import boto3, sys
+import boto3, sys, os
 s3 = boto3.client('s3', region_name='us-east-1')
-for src, key in [
-    ('/tmp/mpc_results.txt', 'evals/mpc/${RUN_ID}/results.txt'),
+uploads = [
+    ('/tmp/mpc_results.txt',  'evals/mpc/${RUN_ID}/results.txt'),
     ('/var/log/mpc-eval.log', 'evals/mpc/${RUN_ID}/instance.log'),
-]:
+    ('/tmp/mpc_best_ep.gif',  'evals/mpc/${RUN_ID}/best_episode.gif'),
+]
+for src, key in uploads:
+    if not os.path.exists(src):
+        print(f'skip {key} (not found)')
+        continue
     try:
         s3.upload_file(src, '${S3_BUCKET}', key)
         print(f'uploaded {key}')

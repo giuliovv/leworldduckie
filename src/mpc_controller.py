@@ -27,7 +27,7 @@ IMG_SIZE   = 224
 EMBED_DIM  = 192
 ACTION_DIM = 2
 HISTORY    = 3   # predictor context window (= notebook HISTORY)
-FRAMESKIP  = 3   # env steps per predictor step (= notebook FRAMESKIP on Colab)
+FRAMESKIP  = 1   # env steps per predictor step — must match notebook FRAMESKIP
 LAG_FRAMES = 4   # duckietown PWM warm-up steps to discard at episode start
 
 # Action bounds: [velocity, steering]
@@ -409,6 +409,10 @@ def main():
     ap.add_argument('--seed',       type=int, default=42)
     ap.add_argument('--video',      default=None,
                     help='Save last episode video to this MP4 path')
+    ap.add_argument('--gif',        default=None,
+                    help='Save best episode (most steps, then reward) as GIF to this path')
+    ap.add_argument('--s3-progress', default=None,
+                    help='S3 URI (s3://bucket/key) to upload a progress summary after each episode')
     ap.add_argument('--verbose',    action='store_true')
     args = ap.parse_args()
 
@@ -425,11 +429,37 @@ def main():
     from gym_duckietown.envs import DuckietownEnv
     rng_env = np.random.default_rng(args.seed)
 
-    all_stats = []
+    s3_progress_bucket = s3_progress_key = None
+    if args.s3_progress:
+        _parts = args.s3_progress[len('s3://'):].split('/', 1)
+        s3_progress_bucket, s3_progress_key = _parts[0], _parts[1]
+
+    def _upload_progress(stats_so_far):
+        if not s3_progress_bucket:
+            return
+        try:
+            import boto3, io
+            lines = [f'ep={s["ep"]}  success={s["success"]}  steps={s["n_steps"]}  '
+                     f'reward={s["mean_reward"]:.3f}  {s["mean_ms"]:.0f}ms/step'
+                     for s in stats_so_far]
+            done = len(stats_so_far)
+            total = args.episodes
+            lines.append(f'--- {done}/{total} episodes done ---')
+            body = '\n'.join(lines) + '\n'
+            boto3.client('s3').put_object(Bucket=s3_progress_bucket,
+                                          Key=s3_progress_key,
+                                          Body=body.encode())
+        except Exception as e:
+            print(f'progress upload failed: {e}')
+
+    all_stats   = []
+    best_frames = []   # frames of the best episode so far
+    best_key    = (-1, -float('inf'))  # (n_steps, mean_reward)
+
     for ep in range(args.episodes):
         ep_seed = int(rng_env.integers(0, 2**31))
         record  = args.video and (ep == args.episodes - 1)
-        vframes = [] if record else None
+        vframes = [] if (record or args.gif) else None
 
         kw = dict(distortion=False, max_steps=args.steps + 20, seed=ep_seed)
         if args.map:
@@ -439,6 +469,7 @@ def main():
 
         env   = DuckietownEnv(**kw)
         stats = run_episode(model, z_goal, env, ep, args, device, vframes)
+        stats['ep'] = ep
         env.close()
         all_stats.append(stats)
 
@@ -447,6 +478,8 @@ def main():
               f'reward={stats["mean_reward"]:.3f}  '
               f'{stats["mean_ms"]:.0f}ms/step')
 
+        _upload_progress(all_stats)
+
         if record and vframes:
             try:
                 import imageio
@@ -454,6 +487,20 @@ def main():
                 print(f'Video saved → {args.video}')
             except Exception as e:
                 print(f'Video write failed: {e}')
+
+        if args.gif and vframes:
+            ep_key = (stats['n_steps'], stats['mean_reward'])
+            if ep_key > best_key:
+                best_key    = ep_key
+                best_frames = list(vframes)
+
+    if args.gif and best_frames:
+        try:
+            import imageio
+            imageio.mimwrite(args.gif, best_frames, fps=10, loop=0)
+            print(f'GIF saved → {args.gif}  ({len(best_frames)} frames, best ep: steps={best_key[0]} reward={best_key[1]:.3f})')
+        except Exception as e:
+            print(f'GIF write failed: {e}')
 
     if args.episodes > 1:
         n_ok     = sum(s['success']     for s in all_stats)
