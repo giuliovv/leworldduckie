@@ -299,7 +299,7 @@ def t4_rollout_error(model, hdf5_path, device,
 
     with h5py.File(hdf5_path, 'r') as f:
         pixels_ds = f['pixels']
-        actions_ds = f['actions']
+        actions_ds = f['action']
 
         for start in range(0, n_actual, batch_size):
             batch_gis = sample_gis[start:start + batch_size]
