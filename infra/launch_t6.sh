@@ -14,10 +14,10 @@ set -euo pipefail
 
 REGION=us-east-1
 AMI_ID=ami-05e86b3611c60b0b4
-INSTANCE_TYPE=t3.medium
+INSTANCE_TYPE=t3a.medium
 INSTANCE_PROFILE=lewm-ec2-training
 SECURITY_GROUP=sg-03bbca875466eb52a
-SUBNET=subnet-01497e4f428a93b98
+SUBNET=subnet-0adb09e73717bacf0
 S3_BUCKET=leworldduckie
 
 RUN_ID=$(date -u +%Y%m%d_%H%M%S)
