@@ -26,6 +26,10 @@ LATENT_INDEX_S3="s3://${S3_BUCKET}/evals/latent_index.npz"
 STEPS=300
 MAP_ARG=""
 GOAL_MODE="trajectory"
+HORIZON=10
+GOAL_OFFSET=0
+VEL_FLOOR=0.4
+VEL_LAMBDA=50.0
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -33,7 +37,11 @@ while [[ $# -gt 0 ]]; do
         --goal)       GOAL_S3=$2;     shift 2 ;;
         --steps)      STEPS=$2;       shift 2 ;;
         --map)        MAP_ARG="--map $2"; shift 2 ;;
-        --goal-mode)  GOAL_MODE=$2;   shift 2 ;;
+        --goal-mode)    GOAL_MODE=$2;    shift 2 ;;
+        --horizon)      HORIZON=$2;     shift 2 ;;
+        --goal-offset)  GOAL_OFFSET=$2; shift 2 ;;
+        --vel-floor)    VEL_FLOOR=$2;   shift 2 ;;
+        --vel-lambda)   VEL_LAMBDA=$2;  shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -49,6 +57,12 @@ exec >>"\$LOG" 2>&1
 set -x
 echo "=== MPC eval bootstrap \$(date -u) run=${RUN_ID} ==="
 export HOME=/root DEBIAN_FRONTEND=noninteractive
+
+# Live log upload to S3 every 30s
+(while true; do
+    aws s3 cp "\$LOG" "s3://${S3_BUCKET}/evals/mpc/${RUN_ID}/live.log" --quiet 2>/dev/null || true
+    sleep 30
+done) &
 
 apt-get update -q
 apt-get install -y -q libgl1 libglu1-mesa libglib2.0-0 xvfb python3-pip \
@@ -115,6 +129,10 @@ DISPLAY=:99 python3 mpc_controller.py \
     --episodes 10 \
     --frameskip 1 \
     --lag-frames 4 \
+    --horizon ${HORIZON} \
+    --goal-offset ${GOAL_OFFSET} \
+    --vel-floor ${VEL_FLOOR} \
+    --vel-lambda ${VEL_LAMBDA} \
     --gif /tmp/mpc_best_ep.gif \
     --gif-all /tmp/mpc_gifs \
     --s3-progress s3://${S3_BUCKET}/evals/mpc/${RUN_ID}/progress.txt \

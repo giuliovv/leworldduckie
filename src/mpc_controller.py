@@ -279,11 +279,13 @@ class LatentIndex:
                 self.ep_step_to_gi[ep] = {}
             self.ep_step_to_gi[ep][step] = gi
 
-    def query_trajectory(self, z_now: np.ndarray, horizon: int, k: int = 10):
+    def query_trajectory(self, z_now: np.ndarray, horizon: int, k: int = 10,
+                         offset: int = 0):
         """
         KNN search for nearest frame with a valid future trajectory of length horizon.
         Returns (z_goals (H, D), ref_ep, ref_step_base) or None if not found.
-        ref_step_base: step index of matched anchor; z_goals[i] = anchor + i + 1.
+        offset: skip this many steps ahead from the matched anchor before starting
+                the goal window (0 = adjacent frames, N = N steps ahead).
         """
         diffs = self.all_z - z_now
         dists = (diffs * diffs).sum(axis=-1)
@@ -295,7 +297,7 @@ class LatentIndex:
             ep   = int(self.ep_idx[gi])
             step = int(self.step_idx[gi])
             ep_map = self.ep_step_to_gi.get(ep, {})
-            future = [step + h for h in range(1, horizon + 1)]
+            future = [step + offset + h for h in range(1, horizon + 1)]
             if all(s in ep_map for s in future):
                 z_goals = self.all_z[[ep_map[s] for s in future]]
                 return z_goals, ep, step
@@ -314,12 +316,14 @@ class TrajectoryGoalTracker:
     """
 
     def __init__(self, latent_index: LatentIndex, horizon: int, device,
-                 recompute_steps: int = 5, threshold: float = 5.0):
+                 recompute_steps: int = 5, threshold: float = 5.0,
+                 offset: int = 0):
         self.index   = latent_index
         self.horizon = horizon
         self.device  = device
         self.M       = recompute_steps
         self.thr     = threshold
+        self.offset  = offset
         self.reset()
 
     def reset(self):
@@ -338,7 +342,7 @@ class TrajectoryGoalTracker:
             needs = dist0 < self.thr
 
         if needs:
-            result = self.index.query_trajectory(z_np, self.horizon)
+            result = self.index.query_trajectory(z_np, self.horizon, offset=self.offset)
             if result is not None:
                 z_goals_np, ref_ep, ref_base = result
                 self.z_goals   = torch.from_numpy(z_goals_np).to(self.device)
@@ -348,7 +352,7 @@ class TrajectoryGoalTracker:
         else:
             # Shift window: drop first goal, append next frame from reference episode
             self.ref_base += 1
-            next_z = self.index.get_z_at(self.ref_ep, self.ref_base + self.horizon)
+            next_z = self.index.get_z_at(self.ref_ep, self.ref_base + self.offset + self.horizon)
             if next_z is not None:
                 tail = torch.from_numpy(next_z).to(self.device).unsqueeze(0)
             else:
@@ -373,6 +377,8 @@ def cem_plan(
     warm_start=None,              # (horizon, 2) | None
     vel_weight: float = 0.0,      # forward-velocity reward (0 = disabled in trajectory mode)
     steer_weight: float = 0.0,    # steering penalty (0 = disabled)
+    vel_floor: float = 0.0,       # minimum velocity target (0 = disabled)
+    vel_lambda: float = 0.0,      # penalty weight for vel < vel_floor
 ) -> torch.Tensor:
     """
     Cross-Entropy Method planning.  Returns (horizon, 2) best action sequence.
@@ -423,7 +429,9 @@ def cem_plan(
                            .sum(dim=(-1, -2))
         vel_reward = vel_weight   * candidates[:, :, 0].mean(dim=-1)
         steer_cost = steer_weight * candidates[:, :, 1].abs().mean(dim=-1)
-        costs = traj_cost + smooth - vel_reward + steer_cost
+        mean_vel_seq = candidates[:, :, 0].mean(dim=-1)  # (N,)
+        vel_floor_cost = vel_lambda * torch.clamp(vel_floor - mean_vel_seq, min=0).pow(2)
+        costs = traj_cost + smooth - vel_reward + steer_cost + vel_floor_cost
 
         _, idx = torch.topk(costs, elite_k, largest=False)
         elite  = candidates[idx]
@@ -476,10 +484,15 @@ def run_episode(model, z_goal, env, ep_idx: int, args, device,
     action_buf = deque(maxlen=HISTORY)
     warm_start = None
 
-    rewards    = []
-    step_times = []
-    z_dist     = 0.0
-    done       = False
+    rewards       = []
+    step_times    = []
+    z_dist        = 0.0
+    vel_plan      = 0.0
+    goal_spacing  = 0.0
+    vel_plans     = []
+    goal_spacings = []
+    z_dists_list  = []
+    done          = False
 
     for step in range(args.steps):
         t0 = time.time()
@@ -524,14 +537,24 @@ def run_episode(model, z_goal, env, ep_idx: int, args, device,
             # z_dist: distance to first goal (trajectory) or single goal
             ref_goal = z_goals[0] if z_goals.dim() == 2 else z_goals
             z_dist = (ctx_embs[-1] - ref_goal).norm().item()
+            z_dists_list.append(z_dist)
+
+            if z_goals.dim() == 2 and z_goals.shape[0] > 1:
+                goal_spacing = (z_goals[1:] - z_goals[:-1]).norm(dim=-1).mean().item()
+            else:
+                goal_spacing = 0.0
+            goal_spacings.append(goal_spacing)
 
             plan = cem_plan(
                 model, ctx_embs, ctx_act_past, z_goals, device,
                 horizon=args.horizon, n_samples=args.n_samples,
                 n_iters=args.n_iters, warm_start=ws,
-                vel_weight=args.vel_weight, steer_weight=args.steer_weight)
+                vel_weight=args.vel_weight, steer_weight=args.steer_weight,
+                vel_floor=args.vel_floor, vel_lambda=args.vel_lambda)
             warm_start = plan
             action     = plan[0].cpu().numpy()
+            vel_plan   = plan[0, 0].item()
+            vel_plans.append(vel_plan)
 
         action = np.clip(action, ACT_LO, ACT_HI).astype(np.float32)
         action_buf.append(action)
@@ -549,7 +572,12 @@ def run_episode(model, z_goal, env, ep_idx: int, args, device,
         step_times.append(time.time() - t0)
 
         if args.verbose:
-            zdist_str = f' z_dist={z_dist:.3f}' if step >= HISTORY else ''
+            if step >= HISTORY:
+                zdist_str = (f' z_dist={z_dist:.2f}'
+                             f' vel={vel_plan:.2f}'
+                             f' g_spc={goal_spacing:.2f}')
+            else:
+                zdist_str = ''
             try:
                 lp = env.get_lane_pos2(env.cur_pos, env.cur_angle)
                 print(f'  ep={ep_idx} t={step:3d} r={reward:.3f} '
@@ -571,11 +599,14 @@ def run_episode(model, z_goal, env, ep_idx: int, args, device,
     mean_ms  = float(np.mean(plan_times) * 1000) if plan_times else 0.0
 
     return {
-        'episode':     ep_idx,
-        'success':     success,
-        'n_steps':     n_steps,
-        'mean_reward': mean_rew,
-        'mean_ms':     mean_ms,
+        'episode':           ep_idx,
+        'success':           success,
+        'n_steps':           n_steps,
+        'mean_reward':       mean_rew,
+        'mean_ms':           mean_ms,
+        'mean_vel':          float(np.mean(vel_plans))     if vel_plans     else 0.0,
+        'mean_goal_spacing': float(np.mean(goal_spacings)) if goal_spacings else 0.0,
+        'mean_z_dist':       float(np.mean(z_dists_list))  if z_dists_list  else 0.0,
     }
 
 
@@ -612,10 +643,16 @@ def main():
                     help='CEM action samples per iteration')
     ap.add_argument('--n-iters',    type=int, default=3,
                     help='CEM refinement iterations')
+    ap.add_argument('--vel-floor',    type=float, default=0.4,
+                    help='Velocity floor: CEM penalised if mean vel < this (default 0.4)')
+    ap.add_argument('--vel-lambda',   type=float, default=50.0,
+                    help='Weight for vel-floor penalty (default 50.0)')
     ap.add_argument('--vel-weight',   type=float, default=None,
                     help='Forward-velocity reward weight (default: 1.0 single, 0.0 trajectory)')
     ap.add_argument('--steer-weight', type=float, default=0.0,
                     help='Steering penalty weight (default 0 = disabled)')
+    ap.add_argument('--goal-offset', type=int, default=0,
+                    help='Steps ahead of KNN anchor to start goal trajectory (0=adjacent, 10=lookahead)')
     ap.add_argument('--seed',       type=int, default=42)
     ap.add_argument('--video',      default=None,
                     help='Save last episode video to this MP4 path')
@@ -634,8 +671,9 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
-    print(f'Goal mode: {args.goal_mode}')
-    print(f'CEM: horizon={args.horizon}  N={args.n_samples}  iters={args.n_iters}')
+    print(f'Goal mode: {args.goal_mode}  offset={args.goal_offset}')
+    print(f'CEM: horizon={args.horizon}  N={args.n_samples}  iters={args.n_iters}'
+          f'  vel_floor={args.vel_floor}  vel_lambda={args.vel_lambda}')
 
     _ensure_lewm()
     setup_duckietown()
@@ -699,7 +737,8 @@ def main():
             goal_tracker = TrajectoryGoalTracker(
                 latent_index, args.horizon, device,
                 recompute_steps=args.goal_recompute_steps,
-                threshold=args.goal_threshold)
+                threshold=args.goal_threshold,
+                offset=args.goal_offset)
 
         env   = DuckietownEnv(**kw)
         stats = run_episode(model, z_goal, env, ep, args, device, vframes,
@@ -711,7 +750,10 @@ def main():
         print(f'Episode {ep}: success={stats["success"]}  '
               f'steps={stats["n_steps"]}  '
               f'reward={stats["mean_reward"]:.3f}  '
-              f'{stats["mean_ms"]:.0f}ms/step')
+              f'{stats["mean_ms"]:.0f}ms/step  '
+              f'vel={stats["mean_vel"]:.3f}  '
+              f'g_spc={stats["mean_goal_spacing"]:.3f}  '
+              f'z_dist={stats["mean_z_dist"]:.3f}')
 
         _upload_progress(all_stats)
 
@@ -748,9 +790,12 @@ def main():
 
     if args.episodes > 1:
         n_ok     = sum(s['success']     for s in all_stats)
-        avg_step = np.mean([s['n_steps']     for s in all_stats])
-        avg_rew  = np.mean([s['mean_reward'] for s in all_stats])
-        avg_ms   = np.mean([s['mean_ms']     for s in all_stats])
+        avg_step = np.mean([s['n_steps']           for s in all_stats])
+        avg_rew  = np.mean([s['mean_reward']        for s in all_stats])
+        avg_ms   = np.mean([s['mean_ms']            for s in all_stats])
+        avg_vel  = np.mean([s['mean_vel']           for s in all_stats])
+        avg_spc  = np.mean([s['mean_goal_spacing']  for s in all_stats])
+        avg_zd   = np.mean([s['mean_z_dist']        for s in all_stats])
         print()
         print('── Summary ──────────────────────────────────')
         print(f'Episodes     : {args.episodes}')
@@ -758,6 +803,9 @@ def main():
         print(f'Mean steps   : {avg_step:.1f}')
         print(f'Mean reward  : {avg_rew:.3f}')
         print(f'Mean ms/step : {avg_ms:.0f}  ({1000/max(avg_ms,1):.1f} steps/s)')
+        print(f'Mean vel     : {avg_vel:.3f}  (near 0 = self-gaming)')
+        print(f'Mean g_spc   : {avg_spc:.3f}  (near 0 = near-static goal trajectory)')
+        print(f'Mean z_dist  : {avg_zd:.3f}')
         print('─────────────────────────────────────────────')
 
 

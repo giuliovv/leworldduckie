@@ -17,7 +17,7 @@ INSTANCE_TYPE=g4dn.xlarge
 S3_BUCKET=leworldduckie
 INSTANCE_PROFILE=lewm-ec2-training
 SECURITY_GROUP=sg-03bbca875466eb52a
-SUBNET=subnet-0926809da94f51a24
+SUBNET=subnet-0b799a4832af70f5b
 
 EPOCHS=50
 RUN_ID=$(date -u +%Y%m%d_%H%M%S)
@@ -48,6 +48,12 @@ exec > >(tee /var/log/lewm-train.log | logger -t lewm-train) 2>&1
 
 echo "=== LeWM Training bootstrap ==="
 export HOME=/root
+
+# Live log upload to S3 every 30s
+(while true; do
+    aws s3 cp /var/log/lewm-train.log "s3://${S3_BUCKET}/training/runs/${RUN_ID}/live.log" --quiet 2>/dev/null || true
+    sleep 30
+done) &
 export PATH="\$PATH:/usr/local/cuda/bin"
 
 # Install Python deps (DLAMI already has PyTorch + CUDA)
@@ -58,7 +64,7 @@ aws s3 cp s3://${S3_BUCKET}/training/train.py /tmp/train.py --region ${REGION}
 
 # Run training
 cd /tmp
-python train.py --run-id ${RUN_ID} --epochs ${EPOCHS} ${INIT_FLAG}
+python3 train.py --run-id ${RUN_ID} --epochs ${EPOCHS} ${INIT_FLAG}
 EXIT_CODE=\$?
 
 # Upload logs to S3

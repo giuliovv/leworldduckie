@@ -264,6 +264,183 @@ def t6_action_discriminability(model, hdf5_path, device,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# T6-RH: T6 with randomised history (hypothesis A vs B diagnostic)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def t6_random_history(model, hdf5_path, device,
+                      n_samples=100, n_rollout_steps=3,
+                      seed=42, batch_size=32):
+    """
+    Same T6 protocol but the two history frames preceding z_now are replaced
+    by random, unrelated frames drawn from anywhere in the dataset.
+    history = [z_rand1, z_rand2, z_now]
+
+    Interpretation vs real-history T6 ratio (0.86×):
+      ratio >> 0.86×  → Hyp B: coherent history was suppressing action effects.
+                         Fix: retrain with history=1 or random history masking.
+      ratio ≈ 0.86×   → Hyp A: predictor ignores actions regardless of history.
+                         Fix: fix action normalization and retrain.
+      ratio << 0.86×  → predictor needs consistent temporal context; brittle to OOD.
+    """
+    rng = np.random.default_rng(seed + 999)
+    ep_all, step_all, _ = build_episode_lookup(hdf5_path)
+    n_total = len(ep_all)
+
+    # Valid "current" frames: only need the LAG_FRAMES guard
+    valid_now = [gi for gi in range(n_total) if int(step_all[gi]) >= LAG_FRAMES]
+    chosen = rng.choice(len(valid_now), size=min(n_samples, len(valid_now)), replace=False)
+    sample_gis = [valid_now[i] for i in chosen]
+    n_actual = len(sample_gis)
+    print(f'  T6-randHist: {n_actual} samples, {n_rollout_steps} rollout steps')
+
+    # Pre-sample random history indices for all samples
+    rand_hist_gis = [rng.choice(n_total, size=HISTORY - 1, replace=False).tolist()
+                     for _ in range(n_actual)]
+
+    # Collect all unique GIs needed, encode in one sorted pass
+    all_needed = sorted(set(sample_gis + [gi for rh in rand_hist_gis for gi in rh]))
+    gi_to_emb  = {}
+
+    with h5py.File(hdf5_path, 'r') as f:
+        pixels_ds = f['pixels']
+        for bs in range(0, len(all_needed), batch_size * HISTORY):
+            chunk = all_needed[bs:bs + batch_size * HISTORY]
+            px    = pixels_ds[chunk]
+            z     = encode_pixel_batch(model, px, device).cpu()
+            for gi, emb in zip(chunk, z):
+                gi_to_emb[gi] = emb
+
+    a_right  = torch.tensor([[0.4, +0.5]], dtype=torch.float32).expand(1, n_rollout_steps, -1)
+    a_left   = torch.tensor([[0.4, -0.5]], dtype=torch.float32).expand(1, n_rollout_steps, -1)
+
+    diffs_rl, diffs_noise = [], []
+
+    for start in range(0, n_actual, batch_size):
+        batch_idx = list(range(start, min(start + batch_size, n_actual)))
+        B = len(batch_idx)
+
+        ctx_list = []
+        for idx in batch_idx:
+            z_rand = torch.stack([gi_to_emb[gi] for gi in rand_hist_gis[idx]])  # (H-1, D)
+            z_now  = gi_to_emb[sample_gis[idx]].unsqueeze(0)                    # (1, D)
+            ctx_list.append(torch.cat([z_rand, z_now], dim=0).unsqueeze(0))     # (1, H, D)
+
+        z_ctx = torch.cat(ctx_list, dim=0).to(device)  # (B, H, D)
+
+        a_r  = a_right.expand(B, -1, -1).clone().to(device)
+        a_l  = a_left.expand(B, -1, -1).clone().to(device)
+        a_n1 = torch.from_numpy(
+            rng.uniform(-1, 1, (B, n_rollout_steps, 2)).astype(np.float32)).to(device)
+        a_n2 = torch.from_numpy(
+            rng.uniform(-1, 1, (B, n_rollout_steps, 2)).astype(np.float32)).to(device)
+
+        z_right_k = ar_rollout(model, z_ctx, a_r,  n_rollout_steps, device)[:, -1]
+        z_left_k  = ar_rollout(model, z_ctx, a_l,  n_rollout_steps, device)[:, -1]
+        z_n1_k    = ar_rollout(model, z_ctx, a_n1, n_rollout_steps, device)[:, -1]
+        z_n2_k    = ar_rollout(model, z_ctx, a_n2, n_rollout_steps, device)[:, -1]
+
+        diffs_rl.append((z_right_k - z_left_k).norm(dim=-1).cpu())
+        diffs_noise.append((z_n1_k - z_n2_k).norm(dim=-1).cpu())
+
+    d_rl    = torch.cat(diffs_rl)
+    d_noise = torch.cat(diffs_noise)
+    ratio   = float(d_rl.mean() / d_noise.mean()) if d_noise.mean() > 0 else float('inf')
+
+    print(f'  L2(right, left)  mean={d_rl.mean():.4f} ± {d_rl.std():.4f}')
+    print(f'  L2 noise floor   mean={d_noise.mean():.4f} ± {d_noise.std():.4f}')
+    print(f'  Ratio L2(R,L)/noise = {ratio:.2f}×')
+
+    return {'rl': d_rl, 'noise': d_noise, 'ratio': ratio}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Input-vs-Action sensitivity (Hypothesis F diagnostic)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@torch.no_grad()
+def t6_input_sensitivity(model, hdf5_path, device,
+                          n_action_samples=200, n_state_samples=200,
+                          seed=42, batch_size=64):
+    """
+    std_over_actions: fix 1 reference context, vary 200 random actions → per-dim std of 1-step outputs
+    std_over_inputs:  fix reference action (straight 0.4), vary 200 real contexts → per-dim std
+    sensitivity_ratio = std_over_inputs / std_over_actions
+
+    > 10: input-dominated → Hyp F (encoder redundancy) confirmed
+    1-3:  balanced → Hyp F not confirmed
+    """
+    rng = np.random.default_rng(seed + 777)
+    ep_all, step_all, ep_step_to_gi = build_episode_lookup(hdf5_path)
+    n_total = len(ep_all)
+
+    valid = []
+    for gi in range(n_total):
+        ep, step = int(ep_all[gi]), int(step_all[gi])
+        if step < LAG_FRAMES + HISTORY - 1:
+            continue
+        if all(ep_step_to_gi.get((ep, step - h)) is not None for h in range(HISTORY)):
+            valid.append(gi)
+
+    n_states = min(n_state_samples, len(valid))
+    chosen = rng.choice(len(valid), size=n_states, replace=False)
+    state_gis = [valid[i] for i in chosen]
+    print(f'  Sensitivity: {n_states} states, {n_action_samples} actions')
+
+    ctx_list = []
+    with h5py.File(hdf5_path, 'r') as f:
+        pixels_ds = f['pixels']
+        for gi in state_gis:
+            ep, step = int(ep_all[gi]), int(step_all[gi])
+            gis_hist = [ep_step_to_gi[(ep, step - (HISTORY - 1 - h))] for h in range(HISTORY)]
+            px = pixels_ds[gis_hist]
+            z = encode_pixel_batch(model, px, device).cpu()
+            ctx_list.append(z.unsqueeze(0))
+
+    all_ctx = torch.cat(ctx_list)   # (N_state, H, D)
+    z_ref   = all_ctx[0:1]          # (1, H, D) — reference for action sweep
+
+    # Vary action, fix state
+    a_varied = torch.from_numpy(
+        rng.uniform(-1, 1, (n_action_samples, 1, ACTION_DIM)).astype(np.float32))
+    out_a = []
+    for bs in range(0, n_action_samples, batch_size):
+        a_chunk = a_varied[bs:bs + batch_size].to(device)   # (B, 1, 2)
+        B = a_chunk.size(0)
+        z_ctx_b = z_ref.expand(B, -1, -1).to(device)
+        pred = ar_rollout(model, z_ctx_b, a_chunk, n_steps=1, device=device)
+        out_a.append(pred[:, 0].cpu())
+    out_a = torch.cat(out_a)   # (N_action, D)
+    std_action = out_a.std(dim=0).mean().item()
+
+    # Vary state, fix action
+    a_ref_t = torch.tensor([[0.4, 0.0]], dtype=torch.float32)  # straight
+    out_i = []
+    for bs in range(0, n_states, batch_size):
+        ctx_chunk = all_ctx[bs:bs + batch_size].to(device)
+        B = ctx_chunk.size(0)
+        a_b = a_ref_t.expand(B, 1, -1).to(device)
+        pred = ar_rollout(model, ctx_chunk, a_b, n_steps=1, device=device)
+        out_i.append(pred[:, 0].cpu())
+    out_i = torch.cat(out_i)   # (N_state, D)
+    std_input = out_i.std(dim=0).mean().item()
+
+    ratio = std_input / std_action if std_action > 1e-9 else float('inf')
+    print(f'  std(output | varied actions, fixed state):  {std_action:.5f}')
+    print(f'  std(output | varied states,  fixed action): {std_input:.5f}')
+    print(f'  Sensitivity ratio (input / action):         {ratio:.1f}×')
+
+    if ratio > 10:
+        verdict = f'INPUT-DOMINATED ({ratio:.1f}×) — Hyp F confirmed'
+    elif ratio > 3:
+        verdict = f'Mildly input-dominated ({ratio:.1f}×) — partial Hyp F'
+    else:
+        verdict = f'Balanced ({ratio:.1f}×) — Hyp F not confirmed'
+    print(f'  → {verdict}')
+    return {'std_action': std_action, 'std_input': std_input,
+            'sensitivity_ratio': ratio, 'verdict': verdict}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # T4: Rollout prediction error vs horizon
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -447,26 +624,62 @@ def main():
         lines.append(f'  k={k}  {m:.4f} ± {s:.4f}')
 
     print()
-    print('─── T6: Action discriminability ────────────────────────────────────')
-    lines.append('\nT6: Action discriminability')
+    print('─── Input-vs-Action Sensitivity (Hyp F diagnostic) ─────────────────')
+    lines.append('\nInput-vs-Action Sensitivity (Hyp F diagnostic)')
+    sens = t6_input_sensitivity(model, hdf5_path, device,
+                                 batch_size=args.batch_size)
+    for k in ('std_action', 'std_input', 'sensitivity_ratio'):
+        lines.append(f'  {k}: {sens[k]:.4f}')
+    lines.append(f'  verdict: {sens["verdict"]}')
+
+    print()
+    print('─── T6: Action discriminability (real history) ─────────────────────')
+    lines.append('\nT6: Action discriminability (real history)')
     t6 = t6_action_discriminability(model, hdf5_path, device,
                                      n_samples=args.n_samples,
                                      n_rollout_steps=args.n_rollout_steps,
                                      batch_size=args.batch_size)
 
     print()
+    print('─── T6-RH: Action discriminability (random history) ────────────────')
+    lines.append('\nT6-RH: Action discriminability (random history)')
+    t6rh = t6_random_history(model, hdf5_path, device,
+                              n_samples=args.n_samples,
+                              n_rollout_steps=args.n_rollout_steps,
+                              batch_size=args.batch_size)
+
+    # Hypothesis interpretation
+    rh_ratio     = t6rh['ratio']
+    real_ratio   = t6['ratio']
+    boost_factor = rh_ratio / real_ratio if real_ratio > 0 else float('inf')
+
+    print()
     print('═' * 68)
     print('  T6 / T4 SUMMARY')
     print('═' * 68)
-    print(f'  Checkpoint best_val : {best_val:.4f}')
-    print(f'  T6 ratio (R,L)/noise: {t6["ratio"]:.2f}×')
-    verdict = ('PASS' if t6['ratio'] > 2.0
-               else 'MARGINAL (consider more epochs)' if t6['ratio'] > 1.0
+    print(f'  Checkpoint best_val      : {best_val:.4f}')
+    print(f'  T6 ratio real-hist       : {real_ratio:.2f}×')
+    print(f'  T6 ratio random-hist     : {rh_ratio:.2f}×')
+    print(f'  Random-hist boost factor : {boost_factor:.2f}×')
+    verdict = ('PASS' if real_ratio > 2.0
+               else 'MARGINAL (consider more epochs)' if real_ratio > 1.0
                else 'FAIL')
-    print(f'  T6 verdict          : {verdict}')
-    if t6['ratio'] > 2.0:
+    print(f'  T6 verdict               : {verdict}')
+    print()
+    if boost_factor > 3.0:
+        hyp = 'B confirmed: coherent history suppresses action effects'
+        fix = 'Retrain with history=1 OR random history masking p=0.5'
+    elif boost_factor < 1.5:
+        hyp = 'A confirmed: predictor ignores actions regardless of history'
+        fix = 'Fix action normalization (constant ×5.3 scaling) and retrain'
+    else:
+        hyp = 'Ambiguous: partial history effect'
+        fix = 'Consider both fixes: normalization + shorter history'
+    print(f'  Hypothesis: {hyp}')
+    print(f'  Suggested fix: {fix}')
+    if real_ratio > 2.0:
         print('  → CLEARED for MPC eval')
-    elif t6['ratio'] > 1.0:
+    elif real_ratio > 1.0:
         print('  → Consider 30 more training epochs before MPC')
     else:
         print('  → DO NOT proceed to MPC — action signal too weak')
@@ -477,7 +690,12 @@ def main():
         '═' * 68,
         'T6 / T4 SUMMARY',
         f'  best_val = {best_val:.4f}',
-        f'  T6 ratio = {t6["ratio"]:.2f}×  [{verdict}]',
+        f'  T6 ratio (real-hist)   = {real_ratio:.2f}×  [{verdict}]',
+        f'  T6 ratio (random-hist) = {rh_ratio:.2f}×',
+        f'  Boost factor           = {boost_factor:.2f}×',
+        f'  Hypothesis: {hyp}',
+        f'  Suggested fix: {fix}',
+        f'  Sensitivity ratio (input/action) = {sens["sensitivity_ratio"]:.1f}×  [{sens["verdict"]}]',
     ]
 
     with open(args.out, 'w') as fh:

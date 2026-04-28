@@ -395,6 +395,8 @@ def main():
             s3_upload(local_ckpt, ckpt_s3_key)
             if is_best:
                 s3_upload(local_ckpt, f'{run_prefix}/checkpoint_best.pt')
+            if epoch % 10 == 0:
+                s3_upload(local_ckpt, f'{run_prefix}/checkpoint_ep{epoch}.pt')
 
     # ── Final summary to S3 ───────────────────────────────────────────────────
     summary = {
