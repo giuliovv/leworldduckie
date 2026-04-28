@@ -64,7 +64,7 @@ done) &
 export PATH="\$PATH:/usr/local/cuda/bin"
 
 # Install Python deps
-pip3 install -q "stable-worldmodel[train,env]" einops pillow scikit-learn && echo "stable-worldmodel ok"
+pip3 install -q "stable-worldmodel[train,env]" einops pillow scikit-learn zstandard huggingface_hub && echo "stable-worldmodel ok"
 pip3 install -q "numpy<2.0.0" && echo "numpy pin ok"
 
 # Clone le-wm
@@ -82,19 +82,52 @@ s3.download_file(u.netloc, u.path.lstrip('/'), local)
 print('checkpoint ok')
 "
 
-# Download Push-T data (if not already cached on AMI)
+# Download Push-T data: try S3 first, fall back to HuggingFace
 python3 -c "
-import boto3, os, sys
+import boto3, os, sys, zstandard
+from pathlib import Path
 from urllib.parse import urlparse
-u = urlparse('${DATA}')
-local = '/tmp/pusht_expert_train.h5'
-if os.path.exists(local):
-    print('data already cached')
+
+local = Path('/tmp/pusht_expert_train.h5')
+zst   = Path('/tmp/pusht_expert_train.h5.zst')
+
+if local.exists():
+    print(f'data already cached: {local}')
     sys.exit(0)
-s3 = boto3.client('s3', region_name='${REGION}')
-print(f'Downloading Push-T dataset (this will take a few minutes)...')
-s3.download_file(u.netloc, u.path.lstrip('/'), local)
-print('data ok')
+
+# Try S3 first
+data_uri = '${DATA}'
+if data_uri.startswith('s3://'):
+    try:
+        u = urlparse(data_uri)
+        s3 = boto3.client('s3', region_name='${REGION}')
+        print(f'Downloading from S3: {data_uri}')
+        s3.download_file(u.netloc, u.path.lstrip('/'), str(local))
+        print('data ok (S3)')
+        sys.exit(0)
+    except Exception as e:
+        print(f'S3 download failed ({e}), falling back to HuggingFace')
+
+# Fall back to HuggingFace (quentinll/lewm-pusht)
+from huggingface_hub import hf_hub_download
+print('Downloading pusht_expert_train.h5.zst from HuggingFace (~13 GB)...')
+dl = hf_hub_download(
+    repo_id='quentinll/lewm-pusht',
+    filename='pusht_expert_train.h5.zst',
+    repo_type='dataset',
+    local_dir='/tmp',
+)
+import shutil
+dl_p = Path(dl)
+if dl_p.resolve() != zst.resolve():
+    shutil.copy2(dl_p, zst)
+
+print('Decompressing...')
+dctx = zstandard.ZstdDecompressor()
+with open(zst, 'rb') as fin, open(local, 'wb') as fout:
+    dctx.copy_stream(fin, fout)
+zst.unlink()
+print(f'data ok (HuggingFace): {local.stat().st_size / 1e9:.1f} GB')
 "
 
 # Download diagnostics script
