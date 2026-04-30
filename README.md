@@ -90,19 +90,21 @@ python src/validate_pipeline.py
 
 ## Known limitations
 
-### Policy-entangled dynamics (MPC distribution shift)
+### Duckietown is not the original LeWM benchmark
 
-During data collection the `LaneFollowController` applies a **new action at every raw env step**. With `FRAMESKIP=3` the dataset stores `(z_t, a_t, z_{t+3})` pairs, but the three intervening env steps were actually driven by `a_{t+1}` and `a_{t+2}` from the PD controller. The predictor therefore learns:
+The LeWM paper evaluates on tasks such as Push-T and other benchmark domains, not gym-duckietown lane following. Results here should be treated as a domain-transfer study, not direct paper replication.
 
-```
-E[z_{t+3} | z_t, a_t,  policy applies a_{t+1}, a_{t+2}]
-```
+### Action signal is dominated by state/history signal in current predictor
 
-At MPC time the agent **holds `a_t` constant** for all 3 raw steps (frameskip loop). This is out-of-distribution: the predictor has never seen a trajectory where the same action is repeated three times in a row. The rollout is biased in a way that depends on how similar the planned action is to the PD policy's response.
+Current diagnostics indicate predictor outputs are much more sensitive to latent state/history variation than to action variation. In practice this means MPC has weak steering authority from model rollouts even when encoder quality is high.
 
-**Impact**: the predictor will still work — the bias is subtle, not catastrophic — but rollout accuracy is degraded compared to a policy that was collected under the same repeat-action assumption.
+### Metric pitfall: step-count can overrate "slow survival"
 
-**Future work**: re-collect with a controller that repeats each sampled action for `FRAMESKIP` raw steps before recording (action-repeat data collection), then retrain and compare eval metrics to the current baseline.
+Latent-goal MPC can exploit low-speed behavior that survives longer without robust lane-following. Episode length should be interpreted together with behavior-level steering/lane metrics.
+
+### Temporal-semantics consistency remains critical
+
+Training and MPC must use compatible temporal assumptions (`frameskip`, action-hold behavior, lag handling). Mismatch here can confound interpretation of results.
 
 ## Notebook sections
 

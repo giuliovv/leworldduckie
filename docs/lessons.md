@@ -1,126 +1,81 @@
-# Lessons Learned & Bugs Fixed
+# Lessons Learned & Current Diagnosis
 
-## 1. Policy-Entanglement / FRAMESKIP Bug (critical)
+This document is the current summary of the Duckietown LeWM investigation as of 2026-04-30.
 
-**Symptom**: MPC success rate 0/10 across all runs. Agent spins in circles.
+## Goal
 
-**Root cause**: The dataset is collected at 1-step granularity (every raw env step). With `FRAMESKIP=3` in training, the model learns:
+Apply LeWorldModel (Maes et al. 2026, arXiv:2603.19312) as the dynamics model for an MPC lane-following controller in gym-duckietown.
 
-```
-predict(z_0, a_0) ≈ z_3
-```
+## High-Level Outcome
 
-But `z_3` was produced by the sequence `a_0 → a_1 → a_2` (three different PD controller actions). The model implicitly learns:
+- Encoder quality is strong.
+- Predictor rollout quality is usable at short horizon.
+- MPC failure is not primarily CEM tuning.
+- Main issue is weak action influence in predictor outputs relative to state/history influence.
 
-```
-E[z_{t+3} | z_t, a_t,  policy applies a_{t+1}, a_{t+2}]
-```
+## Chronology of Findings
 
-At MPC time, the agent **repeats `a_t` three times** (frameskip loop). This is out-of-distribution: the model has never seen a trajectory where the same action is held for three steps. Rollouts are biased toward wherever the PD controller would go.
+1. Encoder quality validated.
+- Linear probe `z -> steering` reached `R^2 ~= 0.98`.
+- Latent structure diagnostics did not indicate catastrophic collapse.
 
-**Fix**: Set `FRAMESKIP=1` everywhere:
-- `lewm_duckie.ipynb` cell 4: `FRAMESKIP = 1`
-- `lewm_duckie_run.ipynb` cell 4: `FRAMESKIP = 1`
-- `src/mpc_controller.py` default: `FRAMESKIP = 1`
-- `infra/launch_mpc_eval.sh`: `--frameskip 1`
+2. Predictor rollout error characterized.
+- Error grows roughly linearly with horizon (~0.5 L2 per step).
+- Practical planning horizon is short (~3-4 steps).
 
-No re-collection needed: the dataset is already at 1-step granularity.
+3. MPC self-gaming observed.
+- With latent-goal cost, agent discovered "move minimally" behavior.
+- Episodes labeled as success often had low mean velocity (~0.15).
 
-**Impact note**: This also means the model trains on all consecutive frame pairs (including high-correlation adjacent frames). Consider collecting with action-repeat in future to allow FRAMESKIP>1 without entanglement.
+4. Velocity-floor intervention exposed steering failure.
+- Forcing forward speed (~0.45) removed parking behavior.
+- Agent then moved faster but crashed, indicating poor steering control.
 
----
+5. T6 steering sensitivity showed weak action conditioning.
+- `frameskip=1` checkpoint: action-separation/noise ratio ~`0.19x`.
+- `frameskip=3` checkpoint: ratio ~`0.33x`.
+- Action effect was much smaller than rollout noise floor.
 
-## 2. Stale Generator via Base64 Embedding (fixed 2026-04-23)
+6. Identity shortcut hypothesis investigated.
+- Consecutive-frame latent distance was too small to force strong action use.
+- Predictor could satisfy JEPA loss via near-identity temporal extrapolation.
 
-**Symptom**: Editing `generate_data.py` had no effect on EC2 runs. Data was being collected with the old `PDController` instead of `LaneFollowController`.
+7. Architecture/wiring audit.
+- AdaLN wiring and gradient flow appeared technically correct.
+- No single obvious implementation bug was found that fully explains behavior.
 
-**Root cause**: `launch_datagen.sh` had a hardcoded base64 blob of an old version of `generate_data.py`. EC2 always decoded and ran that blob, ignoring the file on disk.
+8. Retraining with stronger temporal stride.
+- `frameskip=6, n_preds=4` reduced pure identity shortcut viability.
+- Predictor now modeled change better than before.
 
-**Fix**: Removed the base64 blob entirely. `launch_datagen.sh` now:
-1. Uploads `generate_data.py` to `s3://leworldduckie/scripts/generate_data.py` before launching
-2. EC2 downloads via `boto3` at runtime
+9. But action conditioning remained weak.
+- New checkpoint T6 ratio improved only to ~`0.86x` (still under noise floor).
 
-This pattern is now used consistently across `launch_datagen.sh`, `launch_eval.sh`, and `launch_mpc_eval.sh`.
+10. History-shortcut hypothesis tested and rejected.
+- Randomized-history T6 stayed similar (~`0.89x`).
+- Weak action signal persisted even with degraded history coherence.
 
----
+11. Encoder-redundancy hypothesis confirmed.
+- Sensitivity test:
+  - output std under varied actions, fixed state: ~`0.020`
+  - output std under varied states, fixed action: ~`0.999`
+  - ratio ~`50.6x` (state dominates action).
 
-## 3. boto3 Missing in Colab (silent S3 upload failure)
+## Current Interpretation
 
-**Symptom**: Training ran successfully but no checkpoint appeared in S3. Every epoch printed `S3 upload skipped: No module named 'boto3'`.
+The predictor is not literally action-agnostic, but in this domain the action signal is dominated by state/history signal.
 
-**Root cause**: `boto3` was not in the pip install list in the notebook setup cell.
+A plausible explanation is that single-frame latent `z_t` already encodes enough information about current motion and correction trend, so minimizing 1-step JEPA prediction error does not force heavy reliance on explicit action inputs.
 
-**Fix**: Added `'boto3'` to the installs loop in all three notebooks (`lewm_duckie.ipynb`, `lewm_duckie_run.ipynb`, `lewm_duckie_run_pid.ipynb`).
+## Practical Implications
 
----
+- Increasing CEM budget alone is unlikely to fix steering quality.
+- Better metrics are needed: raw step-count can overrate "slow survival" behavior.
+- Future model work should explicitly increase action identifiability in dynamics learning.
 
-## 4. Lag Frames Missing in MPC (fixed 2026-04-24)
+## Recommended Next Work
 
-**Symptom**: MPC starts in an OOD state — the dynamics model was trained with `skip_initial_steps=4` (gym-duckietown PWM warm-up), so the first 4 env steps were discarded in training data.
-
-**Root cause**: MPC was starting immediately from step 0.
-
-**Fix**: At episode start, burn 4 LaneFollower steps (not added to the context):
-```python
---lag-frames 4
-```
-These match the `LAG_FRAMES=4` config in the notebook and replicate the `skip_initial_steps=4` in `generate_data.py`.
-
----
-
-## 5. EC2 Spot Capacity Exhausted in us-east-1a and us-east-1b
-
-**Symptom**: `InsufficientInstanceCapacity` error when launching t3.medium spot instances.
-
-**Fix**: Use subnet in us-east-1c: `subnet-01497e4f428a93b98`.
-
-Both `launch_datagen.sh` and `launch_mpc_eval.sh` updated with this subnet.
-
----
-
-## 6. Wrong Notebook Edited
-
-**Symptom**: Changes made to `lewm_duckie_run_pid.ipynb` (a logging-only variant) instead of the main training notebook `lewm_duckie.ipynb` / `lewm_duckie_run.ipynb`.
-
-**Fix**: Applied all changes (`FRAMESKIP=1`, `boto3`, `BATCH_SIZE=512`) to both `lewm_duckie.ipynb` and `lewm_duckie_run.ipynb`.
-
-**Lesson**: The `_pid` notebook is a stripped-down variant used only for saving training logs. Always edit the main notebooks (`lewm_duckie.ipynb` and `lewm_duckie_run.ipynb`).
-
----
-
-## 7. gdown `--id` Flag Removed
-
-**Symptom**: `gdown --id FILE_ID` fails — the `--id` flag was removed in newer gdown versions.
-
-**Fix**: Use full URL format:
-```bash
-gdown "https://drive.google.com/uc?id=FILE_ID"
-```
-
----
-
-## 8. GPU Underutilisation on A100
-
-**Symptom**: Training used only ~13 GB of a 40 GB A100 with `BATCH_SIZE=128`.
-
-**Fix**: Bumped `BATCH_SIZE` from 128 to 512 in all notebooks:
-```python
-BATCH_SIZE = 32 if not IS_COLAB else 512
-```
-
-Expected effect: ~2× speedup per epoch (~70s vs ~140s), GPU usage ~30-35 GB.
-
----
-
-## Summary Table
-
-| Bug | Impact | Fix |
-|-----|--------|-----|
-| FRAMESKIP policy-entanglement | MPC 0% success | FRAMESKIP=1 everywhere |
-| Base64 stale generator | Wrong data collected | S3 upload+download pattern |
-| boto3 missing | No S3 checkpoints saved | Add boto3 to pip installs |
-| Lag frames missing | OOD episode starts | --lag-frames 4 |
-| us-east-1a/b spot capacity | Launch failures | Switch to us-east-1c |
-| Wrong notebook edited | Fixes lost | Edit main notebooks only |
-| gdown --id removed | Google Drive download fails | Full URL format |
-| BATCH_SIZE=128 on A100 | 2× slower training | BATCH_SIZE=512 |
+1. Keep Duckietown as a LeWM-methodology testbed, not a paper-replication benchmark.
+2. Run one official LeWM benchmark (e.g., Push-T) to verify external baseline reproducibility.
+3. For Duckietown dynamics learning, prioritize objectives/augmentations that force action use.
+4. Evaluate with behavior-centric metrics (lane tracking quality, steering-response tests), not only episode length.
