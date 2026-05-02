@@ -17,12 +17,13 @@
 #
 # Usage:
 #   bash infra/launch_pusht_train.sh [--epochs 100] [--batch 128] [--run-id ID]
+#                                   [--max-minutes 60] [--instance-type g4dn.xlarge]
 
 set -euo pipefail
 
 REGION=us-east-1
 AMI_ID=ami-09d0a18beb02cc7d4   # Deep Learning OSS Nvidia PyTorch 2.7 Ubuntu 22.04
-INSTANCE_TYPE=g4dn.xlarge       # T4 16 GB → batch=128, ~4h / 100 epochs
+INSTANCE_TYPE=g4dn.xlarge       # T4 16 GB
 INSTANCE_PROFILE=lewm-ec2-training
 SECURITY_GROUP=sg-03bbca875466eb52a
 SUBNET=subnet-0b799a4832af70f5b
@@ -31,13 +32,17 @@ S3_BUCKET=leworldduckie
 EPOCHS=100
 BATCH_SIZE=128
 PRECISION=bf16-mixed
-NUM_WORKERS=4
+NUM_WORKERS=1
+MAX_MINUTES=60
 RUN_ID=$(date -u +%Y%m%d_%H%M%S)
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --epochs)  EPOCHS=$2;     shift 2 ;;
         --batch)   BATCH_SIZE=$2; shift 2 ;;
+        --workers) NUM_WORKERS=$2; shift 2 ;;
+        --max-minutes) MAX_MINUTES=$2; shift 2 ;;
+        --instance-type) INSTANCE_TYPE=$2; shift 2 ;;
         --run-id)  RUN_ID=$2;     shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -106,16 +111,23 @@ echo "dataset ok"
 # Run training
 export STABLEWM_HOME=/root/.stable-wm
 cd /tmp/le-wm
+set -o pipefail
+timeout --signal=TERM ${MAX_MINUTES}m \
 python3 train.py \
-    data=pusht \
-    subdir=pusht \
-    wandb.enabled=false \
-    trainer.max_epochs=${EPOCHS} \
-    loader.batch_size=${BATCH_SIZE} \
-    loader.num_workers=${NUM_WORKERS} \
-    trainer.precision=${PRECISION} \
-    2>&1 | tee /tmp/train_stdout.txt
+  data=pusht \
+  subdir=pusht \
+  wandb.enabled=false \
+  trainer.max_epochs=${EPOCHS} \
+  loader.batch_size=${BATCH_SIZE} \
+  loader.num_workers=${NUM_WORKERS} \
+  loader.pin_memory=false \
+  loader.persistent_workers=false \
+  trainer.precision=${PRECISION} \
+  2>&1 | tee /tmp/train_stdout.txt
 TRAIN_EXIT=\${PIPESTATUS[0]}
+if [ "\${TRAIN_EXIT}" -eq 124 ]; then
+  echo "training timeout reached at ${MAX_MINUTES} minutes"
+fi
 echo "training exit: \${TRAIN_EXIT}"
 
 # Upload checkpoint(s) and logs to S3
@@ -160,7 +172,7 @@ shutdown -h now
 USERDATA
 )
 
-echo "==> Launching spot g4dn.xlarge for Push-T training (run_id=${RUN_ID}) ..."
+echo "==> Launching spot ${INSTANCE_TYPE} for Push-T training (run_id=${RUN_ID}) ..."
 
 INSTANCE_ID=$(aws ec2 run-instances \
     --region "$REGION" \
@@ -179,6 +191,7 @@ INSTANCE_ID=$(aws ec2 run-instances \
 echo ""
 echo "==> Instance  : ${INSTANCE_ID}"
 echo "==> Run ID    : ${RUN_ID}"
+echo "==> Timeout   : ${MAX_MINUTES} minutes"
 echo ""
 echo "Monitor (bootstrap ~15 min, training ~4h on T4 / ~1h on A100):"
 echo ""
