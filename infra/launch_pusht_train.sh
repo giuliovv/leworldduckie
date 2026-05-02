@@ -52,9 +52,43 @@ USER_DATA=$(cat <<USERDATA
 #!/bin/bash
 LOG=/var/log/pusht-train.log
 exec >>"\$LOG" 2>&1
-set -x
+set -euxo pipefail
 echo "=== Push-T training bootstrap \$(date -u) run=${RUN_ID} ==="
 export HOME=/root DEBIAN_FRONTEND=noninteractive MUJOCO_GL=egl
+
+cleanup_and_shutdown() {
+  EXIT_CODE=$?
+  echo "=== cleanup (exit code: \${EXIT_CODE}) ==="
+
+  # Best-effort uploads so we can debug failures without keeping instance alive.
+  aws s3 cp "\$LOG" "s3://${S3_BUCKET}/training/pusht/${RUN_ID}/instance.log" --quiet 2>/dev/null || true
+  [ -f /tmp/train_stdout.txt ] && aws s3 cp /tmp/train_stdout.txt "s3://${S3_BUCKET}/training/pusht/${RUN_ID}/train_stdout.txt" --quiet 2>/dev/null || true
+
+  # Upload any checkpoint(s) that exist.
+  python3 - <<'PY' || true
+import glob
+from pathlib import Path
+import boto3
+
+bucket = '${S3_BUCKET}'
+run_id = '${RUN_ID}'
+run_dir = Path('/root/.stable-wm/pusht')
+s3 = boto3.client('s3', region_name='us-east-1')
+
+ckpts = sorted(glob.glob(str(run_dir / 'lewm_epoch_*_object.ckpt')))
+for ckpt in ckpts:
+    key = f'training/pusht/{run_id}/{Path(ckpt).name}'
+    s3.upload_file(ckpt, bucket, key)
+
+canonical_src = ckpts[-1] if ckpts else str(run_dir / 'lewm_object.ckpt')
+if Path(canonical_src).exists():
+    s3.upload_file(canonical_src, bucket, 'training/pusht/pusht/lewm_object.ckpt')
+PY
+
+  # Always stop instance to avoid cost leakage.
+  shutdown -h now || true
+}
+trap cleanup_and_shutdown EXIT
 
 # Live log upload every 30s
 (while true; do
@@ -129,46 +163,7 @@ if [ "\${TRAIN_EXIT}" -eq 124 ]; then
   echo "training timeout reached at ${MAX_MINUTES} minutes"
 fi
 echo "training exit: \${TRAIN_EXIT}"
-
-# Upload checkpoint(s) and logs to S3
-python3 -c "
-import glob, boto3
-from pathlib import Path
-
-s3      = boto3.client('s3', region_name='us-east-1')
-bucket  = '${S3_BUCKET}'
-run_id  = '${RUN_ID}'
-run_dir = Path('/root/.stable-wm/pusht')
-
-# Per-epoch checkpoints
-ckpts = sorted(glob.glob(str(run_dir / 'lewm_epoch_*_object.ckpt')))
-for ckpt in ckpts:
-    key = f'training/pusht/{run_id}/{Path(ckpt).name}'
-    s3.upload_file(ckpt, bucket, key)
-    print(f'uploaded {key}')
-
-# Canonical checkpoint (latest epoch overwrites the shared path for eval)
-canonical_src = ckpts[-1] if ckpts else str(run_dir / 'lewm_object.ckpt')
-if Path(canonical_src).exists():
-    s3.upload_file(canonical_src, bucket, 'training/pusht/pusht/lewm_object.ckpt')
-    print('uploaded training/pusht/pusht/lewm_object.ckpt')
-else:
-    print('WARNING: no checkpoint found')
-
-for src, key in [
-    ('/tmp/train_stdout.txt',       f'training/pusht/{run_id}/train_stdout.txt'),
-    ('/var/log/pusht-train.log',    f'training/pusht/{run_id}/instance.log'),
-]:
-    try:
-        if Path(src).exists():
-            s3.upload_file(src, bucket, key)
-            print(f'uploaded {key}')
-    except Exception as e:
-        print(f'upload failed {key}: {e}')
-" || true
-
-echo "=== done, shutting down ==="
-shutdown -h now
+echo "=== done; cleanup trap will upload and shut down ==="
 USERDATA
 )
 
@@ -182,7 +177,7 @@ INSTANCE_ID=$(aws ec2 run-instances \
     --security-group-ids "$SECURITY_GROUP" \
     --subnet-id "$SUBNET" \
     --instance-market-options '{"MarketType":"spot","SpotOptions":{"SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}' \
-    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":80,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
+    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=lewm-pusht-train-${RUN_ID}},{Key=Project,Value=leworldduckie}]" \
     --user-data "$USER_DATA" \
     --query 'Instances[0].InstanceId' \
