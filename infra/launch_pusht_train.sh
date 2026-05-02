@@ -30,7 +30,7 @@ SUBNET=subnet-0b799a4832af70f5b
 S3_BUCKET=leworldduckie
 
 EPOCHS=100
-BATCH_SIZE=128
+BATCH_SIZE=64
 PRECISION=bf16-mixed
 NUM_WORKERS=1
 MAX_MINUTES=60
@@ -55,6 +55,7 @@ exec >>"\$LOG" 2>&1
 set -euxo pipefail
 echo "=== Push-T training bootstrap \$(date -u) run=${RUN_ID} ==="
 export HOME=/root DEBIAN_FRONTEND=noninteractive MUJOCO_GL=egl
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 cleanup_and_shutdown() {
   EXIT_CODE=$?
