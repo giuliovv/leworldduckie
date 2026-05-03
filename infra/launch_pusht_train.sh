@@ -43,6 +43,7 @@ while [[ $# -gt 0 ]]; do
         --workers) NUM_WORKERS=$2; shift 2 ;;
         --max-minutes) MAX_MINUTES=$2; shift 2 ;;
         --instance-type) INSTANCE_TYPE=$2; shift 2 ;;
+        --subnet) SUBNET=$2; shift 2 ;;
         --run-id)  RUN_ID=$2;     shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
