@@ -191,6 +191,7 @@ aws s3 cp "s3://${S3_BUCKET}/evals/pusht_diagnostics.py" /tmp/pusht_diagnostics.
 # ── Run eval.py (CEM MPC on PushT-v1) ────────────────────────────────────────
 mkdir -p /root/.stable-wm/pusht
 cp /tmp/lewm_object.ckpt /root/.stable-wm/pusht/lewm_object.ckpt
+cp /tmp/pusht_expert_train.h5 /root/.stable-wm/pusht_expert_train.h5
 export STABLEWM_HOME=/root/.stable-wm
 
 cd /tmp/le-wm
