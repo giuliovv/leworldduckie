@@ -18,6 +18,7 @@
 #   bash infra/launch_pusht_eval.sh [--ckpt s3://.../lewm_object.ckpt]
 #                                    [--data s3://.../pusht_expert_train.h5]
 #                                    [--n-eval-episodes 100]
+#                                    [--subnet subnet-xxxxxxxx]
 
 set -euo pipefail
 
@@ -40,6 +41,7 @@ while [[ $# -gt 0 ]]; do
         --ckpt)           CKPT=$2;   shift 2 ;;
         --data)           DATA=$2;   shift 2 ;;
         --n-eval-episodes) N_EVAL=$2; shift 2 ;;
+        --subnet)         SUBNET=$2; shift 2 ;;
         --keep-on-fail)   KEEP_ON_FAIL=1; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
