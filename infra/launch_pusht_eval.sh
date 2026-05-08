@@ -33,12 +33,14 @@ RUN_ID=$(date -u +%Y%m%d_%H%M%S)
 CKPT="s3://${S3_BUCKET}/training/pusht/pusht/lewm_object.ckpt"
 DATA="s3://${S3_BUCKET}/data/pusht_expert_train.h5"
 N_EVAL=100
+KEEP_ON_FAIL=0
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --ckpt)           CKPT=$2;   shift 2 ;;
         --data)           DATA=$2;   shift 2 ;;
         --n-eval-episodes) N_EVAL=$2; shift 2 ;;
+        --keep-on-fail)   KEEP_ON_FAIL=1; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -51,6 +53,7 @@ USER_DATA=$(cat <<USERDATA
 #!/bin/bash
 LOG=/var/log/pusht-eval.log
 exec >>"\$LOG" 2>&1
+set -Eeuo pipefail
 set -x
 echo "=== Push-T eval bootstrap \$(date -u) run=${RUN_ID} ==="
 export HOME=/root DEBIAN_FRONTEND=noninteractive MUJOCO_GL=egl
@@ -60,6 +63,47 @@ export HOME=/root DEBIAN_FRONTEND=noninteractive MUJOCO_GL=egl
     aws s3 cp "\$LOG" "s3://${S3_BUCKET}/evals/pusht/${RUN_ID}/live.log" --quiet 2>/dev/null || true
     sleep 30
 done) &
+LOG_SYNC_PID=\$!
+
+finish() {
+    EXIT_CODE=\$?
+    set +e
+    echo "=== finish trap: exit_code=\${EXIT_CODE} at \$(date -u) ==="
+    [ -n "\${LOG_SYNC_PID:-}" ] && kill "\$LOG_SYNC_PID" 2>/dev/null || true
+    aws s3 cp "\$LOG" "s3://${S3_BUCKET}/evals/pusht/${RUN_ID}/live.log" --quiet 2>/dev/null || true
+    python3 -c "
+import boto3, os
+s3 = boto3.client('s3', region_name='us-east-1')
+for src, key in [
+    ('/var/log/pusht-eval.log', 'evals/pusht/${RUN_ID}/instance.log'),
+    ('/tmp/eval_stdout.txt',    'evals/pusht/${RUN_ID}/eval_stdout.txt'),
+    ('/tmp/diag_stdout.txt',    'evals/pusht/${RUN_ID}/diag_stdout.txt'),
+    ('/root/.stable-wm/pusht_results.txt', 'evals/pusht/${RUN_ID}/results.txt'),
+    ('/tmp/pusht_diagnostics.txt', 'evals/pusht/${RUN_ID}/diagnostics.txt'),
+]:
+    if os.path.exists(src):
+        try:
+            s3.upload_file(src, '${S3_BUCKET}', key)
+            print(f'uploaded {key}')
+        except Exception as e:
+            print(f'upload failed {key}: {e}')
+" || true
+    echo "exit_code=\${EXIT_CODE}" > /tmp/exit_code.txt
+    aws s3 cp /tmp/exit_code.txt "s3://${S3_BUCKET}/evals/pusht/${RUN_ID}/exit_code.txt" --quiet 2>/dev/null || true
+    if [ "\${EXIT_CODE}" -eq 0 ]; then
+        echo "=== success, shutting down ==="
+        shutdown -h now
+    else
+        if [ "${KEEP_ON_FAIL}" -eq 1 ]; then
+            echo "=== failure, keeping instance alive for debugging (--keep-on-fail) ==="
+            sleep infinity
+        else
+            echo "=== failure, shutting down (logs uploaded) ==="
+            shutdown -h now
+        fi
+    fi
+}
+trap finish EXIT
 
 export PATH="\$PATH:/usr/local/cuda/bin"
 
@@ -159,29 +203,7 @@ python3 pusht_diagnostics.py \
 DIAG_EXIT=\${PIPESTATUS[0]}
 echo "diagnostics exit: \${DIAG_EXIT}"
 
-# ── Upload results ──────────────────────────────────────────────────────────
-python3 -c "
-import boto3, os, sys
-s3 = boto3.client('s3', region_name='us-east-1')
-for src, key in [
-    ('/root/.stable-wm/pusht_results.txt', 'evals/pusht/${RUN_ID}/results.txt'),
-    ('/tmp/pusht_diagnostics.txt',          'evals/pusht/${RUN_ID}/diagnostics.txt'),
-    ('/tmp/eval_stdout.txt',                'evals/pusht/${RUN_ID}/eval_stdout.txt'),
-    ('/tmp/diag_stdout.txt',                'evals/pusht/${RUN_ID}/diag_stdout.txt'),
-    ('/var/log/pusht-eval.log',             'evals/pusht/${RUN_ID}/instance.log'),
-]:
-    if not os.path.exists(src):
-        print(f'skip {key}')
-        continue
-    try:
-        s3.upload_file(src, '${S3_BUCKET}', key)
-        print(f'uploaded {key}')
-    except Exception as e:
-        print(f'upload failed {key}: {e}', file=sys.stderr)
-" || true
-
-echo "=== done, shutting down ==="
-shutdown -h now
+echo "=== done ==="
 USERDATA
 )
 
