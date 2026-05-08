@@ -125,6 +125,20 @@ pip3 install -q "stable-worldmodel[train,env]" einops pillow scikit-learn zstand
 # Clone le-wm
 git clone --depth 1 https://github.com/lucas-maes/le-wm.git /tmp/le-wm && echo "le-wm cloned"
 
+# CPU fallback: eval.py in upstream le-wm hardcodes model.to("cuda")
+python3 - <<'PY'
+from pathlib import Path
+p = Path('/tmp/le-wm/eval.py')
+t = p.read_text()
+old = '    model = model.to("cuda")'
+new = '    model = model.to("cuda" if torch.cuda.is_available() else "cpu")'
+if old in t:
+    p.write_text(t.replace(old, new, 1))
+    print('patched eval.py for cpu fallback')
+else:
+    print('eval.py cuda line not found (already patched?)')
+PY
+
 # Download checkpoint
 python3 -c "
 import boto3, sys
