@@ -115,8 +115,10 @@ trap finish EXIT
 export PATH="\$PATH:/usr/local/cuda/bin"
 
 # Install Python deps
+apt-get update -y
+apt-get install -y swig
 pip3 install -q "pip<25.0" "setuptools<66" wheel && echo "packaging pins ok"
-pip3 install -q boto3 && echo "boto3 ok"
+pip3 install -q boto3 zstandard huggingface_hub && echo "core deps ok"
 pip3 install -q "numpy<2.0.0" && echo "numpy pin ok"
 pip3 install -q "stable-worldmodel[train,env]" einops pillow scikit-learn zstandard huggingface_hub && echo "stable-worldmodel ok"
 
