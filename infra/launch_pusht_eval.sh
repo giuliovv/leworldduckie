@@ -108,8 +108,10 @@ trap finish EXIT
 export PATH="\$PATH:/usr/local/cuda/bin"
 
 # Install Python deps
-pip3 install -q "stable-worldmodel[train,env]" einops pillow scikit-learn zstandard huggingface_hub && echo "stable-worldmodel ok"
+pip3 install -q "pip<25.0" "setuptools<66" wheel && echo "packaging pins ok"
+pip3 install -q boto3 && echo "boto3 ok"
 pip3 install -q "numpy<2.0.0" && echo "numpy pin ok"
+pip3 install -q "stable-worldmodel[train,env]" einops pillow scikit-learn zstandard huggingface_hub && echo "stable-worldmodel ok"
 
 # Clone le-wm
 git clone --depth 1 https://github.com/lucas-maes/le-wm.git /tmp/le-wm && echo "le-wm cloned"
