@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launch a spot g4dn.xlarge to run the Push-T evaluation + diagnostics.
+# Launch an EC2 instance to run the Push-T evaluation + diagnostics.
 #
 # Steps on the instance:
 #   1. Install le-wm + stable-worldmodel[train,env]
@@ -19,6 +19,8 @@
 #                                    [--data s3://.../pusht_expert_train.h5]
 #                                    [--n-eval-episodes 100]
 #                                    [--subnet subnet-xxxxxxxx]
+#                                    [--instance-type c7i.xlarge]
+#                                    [--on-demand]
 
 set -euo pipefail
 
@@ -35,6 +37,7 @@ CKPT="s3://${S3_BUCKET}/training/pusht/pusht/lewm_object.ckpt"
 DATA="s3://${S3_BUCKET}/data/pusht_expert_train.h5"
 N_EVAL=100
 KEEP_ON_FAIL=0
+MARKET_MODE=spot
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -42,6 +45,8 @@ while [[ $# -gt 0 ]]; do
         --data)           DATA=$2;   shift 2 ;;
         --n-eval-episodes) N_EVAL=$2; shift 2 ;;
         --subnet)         SUBNET=$2; shift 2 ;;
+        --instance-type)  INSTANCE_TYPE=$2; shift 2 ;;
+        --on-demand)      MARKET_MODE=ondemand; shift ;;
         --keep-on-fail)   KEEP_ON_FAIL=1; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -211,21 +216,28 @@ echo "=== done ==="
 USERDATA
 )
 
-echo "==> Launching spot g4dn.xlarge for Push-T eval (run_id=${RUN_ID}) ..."
+echo "==> Launching ${MARKET_MODE} ${INSTANCE_TYPE} for Push-T eval (run_id=${RUN_ID}) ..."
 
-INSTANCE_ID=$(aws ec2 run-instances \
-    --region "$REGION" \
-    --image-id "$AMI_ID" \
-    --instance-type "$INSTANCE_TYPE" \
-    --iam-instance-profile Name="$INSTANCE_PROFILE" \
-    --security-group-ids "$SECURITY_GROUP" \
-    --subnet-id "$SUBNET" \
-    --instance-market-options '{"MarketType":"spot","SpotOptions":{"SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}' \
-    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":80,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
-    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=lewm-pusht-eval-${RUN_ID}},{Key=Project,Value=leworldduckie}]" \
-    --user-data "$USER_DATA" \
-    --query 'Instances[0].InstanceId' \
-    --output text)
+COMMON_ARGS=(
+    --region "$REGION"
+    --image-id "$AMI_ID"
+    --instance-type "$INSTANCE_TYPE"
+    --iam-instance-profile Name="$INSTANCE_PROFILE"
+    --security-group-ids "$SECURITY_GROUP"
+    --subnet-id "$SUBNET"
+    --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":80,"VolumeType":"gp3","DeleteOnTermination":true}}]'
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=lewm-pusht-eval-${RUN_ID}},{Key=Project,Value=leworldduckie}]"
+    --user-data "$USER_DATA"
+    --query 'Instances[0].InstanceId'
+    --output text
+)
+
+if [[ "$MARKET_MODE" == "spot" ]]; then
+    INSTANCE_ID=$(aws ec2 run-instances "${COMMON_ARGS[@]}" \
+        --instance-market-options '{"MarketType":"spot","SpotOptions":{"SpotInstanceType":"one-time","InstanceInterruptionBehavior":"terminate"}}')
+else
+    INSTANCE_ID=$(aws ec2 run-instances "${COMMON_ARGS[@]}")
+fi
 
 echo ""
 echo "==> Instance  : ${INSTANCE_ID}"
