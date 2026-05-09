@@ -28,6 +28,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import h5py
+try:
+    import hdf5plugin  # noqa: F401  # Registers HDF5 filters for compressed datasets
+except Exception:
+    pass
 
 LEWM_DIR   = Path('/home/ubuntu/le-wm') if Path('/home/ubuntu/le-wm').exists() \
              else Path('/tmp/le-wm')
@@ -120,8 +124,25 @@ def encode_pixel_batch(jepa, px_uint8, device):
     std  = IMAGENET_STD.to(device)
     px   = (px.to(device) - mean) / std
 
-    emb = jepa.encoder(px, interpolate_pos_encoding=True)  # (B, D)
-    return jepa.projector(emb)                              # (B, D)
+    emb = jepa.encoder(px, interpolate_pos_encoding=True)
+    # HF ViT variants may return BaseModelOutputWithPooling instead of raw tensor.
+    if not torch.is_tensor(emb):
+        if hasattr(emb, 'pooler_output') and emb.pooler_output is not None:
+            emb = emb.pooler_output
+        elif hasattr(emb, 'last_hidden_state') and emb.last_hidden_state is not None:
+            emb = emb.last_hidden_state[:, 0]
+        elif isinstance(emb, dict):
+            if emb.get('pooler_output', None) is not None:
+                emb = emb['pooler_output']
+            elif emb.get('last_hidden_state', None) is not None:
+                emb = emb['last_hidden_state'][:, 0]
+            else:
+                raise TypeError(f'Unsupported encoder dict output keys: {list(emb.keys())}')
+        elif isinstance(emb, (tuple, list)) and len(emb) > 0 and torch.is_tensor(emb[0]):
+            emb = emb[0][:, 0] if emb[0].dim() == 3 else emb[0]
+        else:
+            raise TypeError(f'Unsupported encoder output type: {type(emb)}')
+    return jepa.projector(emb)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

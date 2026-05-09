@@ -38,6 +38,7 @@ DATA="s3://${S3_BUCKET}/data/pusht_expert_train.h5"
 N_EVAL=100
 KEEP_ON_FAIL=0
 MARKET_MODE=spot
+HARD_TIMEOUT_MIN=75
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -46,6 +47,7 @@ while [[ $# -gt 0 ]]; do
         --n-eval-episodes) N_EVAL=$2; shift 2 ;;
         --subnet)         SUBNET=$2; shift 2 ;;
         --instance-type)  INSTANCE_TYPE=$2; shift 2 ;;
+        --hard-timeout-min) HARD_TIMEOUT_MIN=$2; shift 2 ;;
         --on-demand)      MARKET_MODE=ondemand; shift ;;
         --keep-on-fail)   KEEP_ON_FAIL=1; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
@@ -65,6 +67,14 @@ set -x
 echo "=== Push-T eval bootstrap \$(date -u) run=${RUN_ID} ==="
 export HOME=/root DEBIAN_FRONTEND=noninteractive MUJOCO_GL=egl
 
+# Hard watchdog timeout (minutes): force shutdown even if hung
+(
+  sleep $(( ${HARD_TIMEOUT_MIN} * 60 ))
+  echo "=== watchdog timeout reached (${HARD_TIMEOUT_MIN} min), forcing shutdown ==="
+  shutdown -h now
+) &
+WATCHDOG_PID=\$!
+
 # Live log upload every 30s
 (while true; do
     aws s3 cp "\$LOG" "s3://${S3_BUCKET}/evals/pusht/${RUN_ID}/live.log" --quiet 2>/dev/null || true
@@ -77,6 +87,7 @@ finish() {
     set +e
     echo "=== finish trap: exit_code=\${EXIT_CODE} at \$(date -u) ==="
     [ -n "\${LOG_SYNC_PID:-}" ] && kill "\$LOG_SYNC_PID" 2>/dev/null || true
+    [ -n "\${WATCHDOG_PID:-}" ] && kill "\$WATCHDOG_PID" 2>/dev/null || true
     aws s3 cp "\$LOG" "s3://${S3_BUCKET}/evals/pusht/${RUN_ID}/live.log" --quiet 2>/dev/null || true
     python3 -c "
 import boto3, os
@@ -86,6 +97,7 @@ for src, key in [
     ('/tmp/eval_stdout.txt',    'evals/pusht/${RUN_ID}/eval_stdout.txt'),
     ('/tmp/diag_stdout.txt',    'evals/pusht/${RUN_ID}/diag_stdout.txt'),
     ('/root/.stable-wm/pusht_results.txt', 'evals/pusht/${RUN_ID}/results.txt'),
+    ('/tmp/le-wm/pusht_results.txt', 'evals/pusht/${RUN_ID}/results.txt'),
     ('/tmp/pusht_diagnostics.txt', 'evals/pusht/${RUN_ID}/diagnostics.txt'),
 ]:
     if os.path.exists(src):
@@ -116,21 +128,44 @@ export PATH="\$PATH:/usr/local/cuda/bin"
 
 # Install Python deps
 apt-get update -y
+WAIT_SECS=0
+MAX_WAIT_SECS=600
 while pgrep -x unattended-upgr >/dev/null 2>&1; do
-    echo "waiting for unattended-upgr to release dpkg lock..."
+    echo "waiting for unattended-upgr to release dpkg lock... waited=\${WAIT_SECS}s"
+    pgrep -a unattended-upgr || true
+    pgrep -a apt || true
+    pgrep -a dpkg || true
+    lslocks | grep -E 'dpkg|apt' || true
+    tail -n 20 /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null || true
+    tail -n 20 /var/log/dpkg.log 2>/dev/null || true
     sleep 10
-done
-for i in 1 2 3 4 5; do
-    if apt-get install -y swig python3-boto3; then
+    WAIT_SECS=\$((WAIT_SECS+10))
+    if [ "\${WAIT_SECS}" -ge "\${MAX_WAIT_SECS}" ]; then
+        echo "dpkg lock wait exceeded \${MAX_WAIT_SECS}s, forcing recovery"
+        pkill -f unattended-upgr || true
+        pkill -f unattended-upgrade || true
+        pkill -f apt.systemd.daily || true
+        sleep 5
+        dpkg --configure -a || true
         break
     fi
-    echo "apt install failed (attempt \${i}), retrying in 10s..."
-    sleep 10
+done
+for i in 1 2 3 4 5; do
+    if apt-get -o DPkg::Lock::Timeout=120 install -y swig python3-boto3; then
+        break
+    fi
+    echo "apt install failed (attempt \${i}), retrying in 15s..."
+    pgrep -a unattended-upgr || true
+    pgrep -a apt || true
+    pgrep -a dpkg || true
+    lslocks | grep -E 'dpkg|apt' || true
+    dpkg --configure -a || true
+    sleep 15
 done
 pip3 install -q "pip<25.0" "setuptools<66" wheel && echo "packaging pins ok"
 pip3 install -q zstandard huggingface_hub && echo "core deps ok"
 pip3 install -q "numpy<2.0.0" && echo "numpy pin ok"
-pip3 install -q "stable-worldmodel[train,env]" einops pillow scikit-learn zstandard huggingface_hub && echo "stable-worldmodel ok"
+pip3 install -q "stable-worldmodel[train,env]" einops pillow scikit-learn zstandard huggingface_hub hdf5plugin && echo "stable-worldmodel ok"
 
 # Clone le-wm
 git clone --depth 1 https://github.com/lucas-maes/le-wm.git /tmp/le-wm && echo "le-wm cloned"
