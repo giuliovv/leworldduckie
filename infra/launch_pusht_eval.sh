@@ -124,7 +124,7 @@ for i in 1 2 3 4 5; do
     if apt-get install -y swig python3-boto3; then
         break
     fi
-    echo "apt install failed (attempt ${i}), retrying in 10s..."
+    echo "apt install failed (attempt \${i}), retrying in 10s..."
     sleep 10
 done
 pip3 install -q "pip<25.0" "setuptools<66" wheel && echo "packaging pins ok"
