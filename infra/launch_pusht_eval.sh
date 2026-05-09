@@ -116,7 +116,17 @@ export PATH="\$PATH:/usr/local/cuda/bin"
 
 # Install Python deps
 apt-get update -y
-apt-get install -y swig python3-boto3
+while pgrep -x unattended-upgr >/dev/null 2>&1; do
+    echo "waiting for unattended-upgr to release dpkg lock..."
+    sleep 10
+done
+for i in 1 2 3 4 5; do
+    if apt-get install -y swig python3-boto3; then
+        break
+    fi
+    echo "apt install failed (attempt ${i}), retrying in 10s..."
+    sleep 10
+done
 pip3 install -q "pip<25.0" "setuptools<66" wheel && echo "packaging pins ok"
 pip3 install -q zstandard huggingface_hub && echo "core deps ok"
 pip3 install -q "numpy<2.0.0" && echo "numpy pin ok"
