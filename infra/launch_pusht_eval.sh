@@ -209,10 +209,17 @@ cp /tmp/pusht_expert_train.h5 /root/.stable-wm/pusht_expert_train.h5
 export STABLEWM_HOME=/root/.stable-wm
 
 cd /tmp/le-wm
+EVAL_DEVICE=$(python3 - <<'PY'
+import torch
+print("cuda" if torch.cuda.is_available() else "cpu")
+PY
+)
+echo "eval device: ${EVAL_DEVICE}"
 python3 eval.py \
     --config-name=pusht.yaml \
     policy=pusht/lewm \
     eval.num_eval=${N_EVAL} \
+    solver.device=${EVAL_DEVICE} \
     output.filename=pusht_results.txt \
     2>&1 | tee /tmp/eval_stdout.txt
 EVAL_EXIT=\${PIPESTATUS[0]}
