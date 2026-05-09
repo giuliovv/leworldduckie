@@ -227,6 +227,8 @@ echo "eval exit: \${EVAL_EXIT}"
 
 # ── Run diagnostics ──────────────────────────────────────────────────────────
 cd /tmp
+mkdir -p /usr/local/lib/plugin
+export HDF5_PLUGIN_PATH=/usr/local/lib/plugin
 python3 pusht_diagnostics.py \
     --ckpt /tmp/lewm_object.ckpt \
     --data /tmp/pusht_expert_train.h5 \
