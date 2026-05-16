@@ -1,6 +1,6 @@
 #!/bin/bash
-# Launch a t3.medium to collect 100k duckietown transitions and upload to S3.
-# Usage: bash launch_datagen.sh [--n-transitions N]
+# Launch a t3.medium to collect duckietown transitions and upload to S3.
+# Usage: bash launch_datagen.sh [--n-transitions N] [--explore]
 
 set -euo pipefail
 
@@ -13,9 +13,13 @@ SUBNET=subnet-00ef452a9147da192
 DATA_BUCKET=leworldduckie
 
 N_TRANSITIONS=100000
+EXPLORE=0
+S3_KEY="data/duckietown_100k.h5"
 while [[ $# -gt 0 ]]; do
     case $1 in
         --n-transitions) N_TRANSITIONS=$2; shift 2 ;;
+        --explore) EXPLORE=1; S3_KEY="data/duckie_explore.h5"; shift ;;
+        --s3-key) S3_KEY=$2; shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
@@ -81,7 +85,12 @@ sleep 3
 echo "xvfb started"
 
 cd /tmp
-DISPLAY=:99 python3 generate_data.py --n-transitions ${N_TRANSITIONS} --out /tmp/duckietown_100k.h5 --upload
+DISPLAY=:99 python3 generate_data.py \
+    --n-transitions ${N_TRANSITIONS} \
+    --out /tmp/duckietown_100k.h5 \
+    --upload \
+    --s3-key ${S3_KEY} \
+    $( [ "${EXPLORE}" -eq 1 ] && echo --explore )
 EXIT_CODE=\$?
 echo "python exit \${EXIT_CODE}"
 

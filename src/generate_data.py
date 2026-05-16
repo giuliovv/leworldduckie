@@ -25,6 +25,7 @@ from pathlib import Path
 
 S3_BUCKET   = 'leworldduckie'
 S3_DATA_KEY = 'data/duckietown_100k.h5'
+S3_EXPLORE_KEY = 'data/duckie_explore.h5'
 
 MAPS = [
     'small_loop', 'small_loop_cw', 'loop_empty',
@@ -61,12 +62,26 @@ class LaneFollowController:
         pass
 
 
+def sample_random_action(rng, action_low, action_high):
+    return rng.uniform(action_low, action_high).astype(np.float64)
+
+
 def resize(frame):
     import cv2
     return cv2.resize(frame, (IMG_W, IMG_H), interpolation=cv2.INTER_LINEAR)
 
 
-def collect_to_hdf5(out_path, n_transitions, seed=42, max_ep_steps=400):
+def collect_to_hdf5(
+    out_path,
+    n_transitions,
+    seed=42,
+    max_ep_steps=400,
+    explore=False,
+    explore_vel_std=0.15,
+    explore_steer_std=0.30,
+    random_action_prob=0.10,
+    offlane_dist_thresh=0.10,
+):
     from gym_duckietown.envs import DuckietownEnv
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -94,6 +109,10 @@ def collect_to_hdf5(out_path, n_transitions, seed=42, max_ep_steps=400):
         ep_id     = 0
         collected = 0
         buf_pos   = 0
+        total_ep_steps = 0
+        offlane_count = 0
+        action_low = np.array([0.1, -1.0], dtype=np.float64)
+        action_high = np.array([0.6, 1.0], dtype=np.float64)
 
         # Batch episodes by map: run all episodes for one map before switching.
         # Cycling maps every episode recreates the GL context every ~400 steps
@@ -133,9 +152,23 @@ def collect_to_hdf5(out_path, n_transitions, seed=42, max_ep_steps=400):
 
             while collected < n_transitions and ep_step < max_ep_steps:
                 buf_px[buf_pos]  = resize(obs)
-                buf_act[buf_pos] = ctrl.act(env, rng).astype(np.float32)
+                lane_pos = env.get_lane_pos2(env.cur_pos, env.cur_angle)
+                base_action = ctrl.act(env, rng)
+                if explore:
+                    action = base_action + np.array([
+                        rng.normal(0.0, explore_vel_std),
+                        rng.normal(0.0, explore_steer_std),
+                    ], dtype=np.float64)
+                    if rng.random() < random_action_prob:
+                        action = sample_random_action(rng, action_low, action_high)
+                    action = np.clip(action, action_low, action_high)
+                else:
+                    action = base_action
+                buf_act[buf_pos] = action.astype(np.float32)
                 buf_ep[buf_pos]  = ep_id
                 buf_st[buf_pos]  = ep_step
+                if abs(float(lane_pos.dist)) > offlane_dist_thresh:
+                    offlane_count += 1
 
                 obs, _, done, _ = env.step(buf_act[buf_pos])
                 collected += 1
@@ -150,6 +183,7 @@ def collect_to_hdf5(out_path, n_transitions, seed=42, max_ep_steps=400):
                     break
 
             ep_id += 1
+            total_ep_steps += ep_step
 
             elapsed = time.time() - t0
             rate    = collected / max(elapsed, 1)
@@ -169,17 +203,26 @@ def collect_to_hdf5(out_path, n_transitions, seed=42, max_ep_steps=400):
         f.attrs['img_h']         = IMG_H
         f.attrs['img_w']         = IMG_W
         f.attrs['maps']          = ','.join(MAPS)
+        f.attrs['explore']       = int(explore)
+        f.attrs['explore_vel_std'] = float(explore_vel_std)
+        f.attrs['explore_steer_std'] = float(explore_steer_std)
+        f.attrs['random_action_prob'] = float(random_action_prob)
+        f.attrs['offlane_dist_thresh'] = float(offlane_dist_thresh)
+        f.attrs['offlane_fraction_estimate'] = float(offlane_count / max(collected, 1))
+        f.attrs['mean_episode_length'] = float(total_ep_steps / max(ep_id, 1))
 
     size_mb = Path(out_path).stat().st_size / 1e6
     print(f'\nDone: {collected:,} transitions, {ep_id} episodes  ({time.time()-t0:.1f}s)')
     print(f'Saved → {out_path}  ({size_mb:.1f} MB)')
+    print(f'Mean episode length: {total_ep_steps / max(ep_id, 1):.1f}')
+    print(f'Off-lane fraction estimate (|dist|>{offlane_dist_thresh:.2f}): {offlane_count / max(collected, 1):.3f}')
 
 
-def upload_s3(local_path):
+def upload_s3(local_path, s3_key):
     import boto3
     s3 = boto3.client('s3', region_name='us-east-1')
-    print(f'Uploading to s3://{S3_BUCKET}/{S3_DATA_KEY} ...')
-    s3.upload_file(str(local_path), S3_BUCKET, S3_DATA_KEY)
+    print(f'Uploading to s3://{S3_BUCKET}/{s3_key} ...')
+    s3.upload_file(str(local_path), S3_BUCKET, s3_key)
     print('Upload complete.')
 
 
@@ -189,11 +232,31 @@ def main():
     parser.add_argument('--out',           default='data/duckietown_100k.h5')
     parser.add_argument('--seed',          type=int, default=42)
     parser.add_argument('--upload',        action='store_true')
+    parser.add_argument('--s3-key',        default=None,
+                        help='S3 key under bucket leworldduckie. Defaults to duckie_explore.h5 when --explore else duckietown_100k.h5')
+    parser.add_argument('--explore',       action='store_true',
+                        help='Enable exploratory collection mode (large action noise + occasional random actions).')
+    parser.add_argument('--explore-vel-std', type=float, default=0.15)
+    parser.add_argument('--explore-steer-std', type=float, default=0.30)
+    parser.add_argument('--random-action-prob', type=float, default=0.10)
+    parser.add_argument('--offlane-dist-thresh', type=float, default=0.10)
     args = parser.parse_args()
 
-    collect_to_hdf5(args.out, args.n_transitions, seed=args.seed)
+    collect_to_hdf5(
+        args.out,
+        args.n_transitions,
+        seed=args.seed,
+        explore=args.explore,
+        explore_vel_std=args.explore_vel_std,
+        explore_steer_std=args.explore_steer_std,
+        random_action_prob=args.random_action_prob,
+        offlane_dist_thresh=args.offlane_dist_thresh,
+    )
     if args.upload:
-        upload_s3(args.out)
+        s3_key = args.s3_key
+        if s3_key is None:
+            s3_key = S3_EXPLORE_KEY if args.explore else S3_DATA_KEY
+        upload_s3(args.out, s3_key)
 
 
 if __name__ == '__main__':
