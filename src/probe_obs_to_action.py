@@ -48,6 +48,27 @@ def ensure_lewm(lewm_dir: str) -> None:
         sys.path.insert(0, str(p))
 
 
+def guess_lewm_dir(explicit: str | None) -> str:
+    """Pick an existing le-wm source dir in Colab/EC2 layouts."""
+    candidates = []
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    cwd = Path.cwd()
+    candidates.extend(
+        [
+            cwd / 'le-wm',
+            cwd.parent / 'le-wm',
+            Path('/content/le-wm'),
+            Path('/tmp/le-wm'),
+        ]
+    )
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    searched = ', '.join(str(p) for p in candidates)
+    raise FileNotFoundError(f'Could not locate le-wm directory. Searched: {searched}')
+
+
 def extract_encoder_tensor(emb):
     if torch.is_tensor(emb):
         return emb
@@ -66,9 +87,13 @@ def extract_encoder_tensor(emb):
 
 
 def load_jepa(ckpt_path: str, lewm_dir: str, device: torch.device):
+    lewm_dir = guess_lewm_dir(lewm_dir)
     ensure_lewm(lewm_dir)
     obj = torch.load(ckpt_path, map_location=device, weights_only=False)
-    jepa = getattr(obj, 'model', obj)
+    if isinstance(obj, dict) and 'model' in obj:
+        jepa = obj['model']
+    else:
+        jepa = getattr(obj, 'model', obj)
     jepa = jepa.to(device)
     jepa.eval()
     for p in jepa.parameters():
