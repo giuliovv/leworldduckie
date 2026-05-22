@@ -76,8 +76,13 @@ def guess_lewm_dir(explicit: str | None) -> str:
         ]
     )
     for p in candidates:
-        if p.exists():
+        if not p.exists():
+            continue
+        if (p / 'jepa.py').exists():
             return str(p)
+        nested = p / 'le-wm'
+        if (nested / 'jepa.py').exists():
+            return str(nested)
     searched = ', '.join(str(p) for p in candidates)
     raise FileNotFoundError(f'Could not locate le-wm directory. Searched: {searched}')
 
