@@ -74,12 +74,22 @@ echo "=== probe gate bootstrap \$(date -u) run=${RUN_ID} ==="
 ) &
 
 apt-get update -q
-apt-get install -y -q python3-pip git
+apt-get install -y -q python3-pip git awscli
 echo "apt complete @ \$(date -u)"
 python3 -V
 
 pip3 install --no-cache-dir boto3 h5py numpy scikit-learn torch torchvision
 echo "pip installs complete @ \$(date -u)"
+
+python3 - <<'PY'
+import boto3
+boto3.client('s3', region_name='us-east-1').put_object(
+    Bucket='${S3_BUCKET}',
+    Key='evals/probe_gate/${RUN_ID}/started.txt',
+    Body=b'bootstrap_started'
+)
+print('started marker uploaded')
+PY
 
 mkdir -p /tmp/leworldduckie
 cd /tmp/leworldduckie
