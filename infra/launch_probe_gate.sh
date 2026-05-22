@@ -81,7 +81,7 @@ finalize_and_shutdown() {
   aws s3 cp /tmp/exit_code.txt "\${S3_PREFIX}/exit_code.txt" --quiet 2>/dev/null || true
   [[ -f /tmp/probe_results.txt ]] && aws s3 cp /tmp/probe_results.txt "\${S3_PREFIX}/probe_results.txt" --quiet 2>/dev/null || true
   [[ -f /tmp/error.txt ]] && aws s3 cp /tmp/error.txt "\${S3_PREFIX}/error.txt" --quiet 2>/dev/null || true
-  aws s3 cp "$LOG" "\${S3_PREFIX}/instance.log" --quiet 2>/dev/null || true
+  aws s3 cp "\$LOG" "\${S3_PREFIX}/instance.log" --quiet 2>/dev/null || true
   echo "=== finalize code=\$code @ \$(date -u) ==="
   shutdown -h now || true
 }
