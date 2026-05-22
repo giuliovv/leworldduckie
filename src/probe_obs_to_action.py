@@ -133,10 +133,26 @@ def load_jepa(ckpt_path: str, lewm_dir: str, device: torch.device):
             qkv_bias=True,
         )
         encoder = ViTModel(enc_cfg, add_pooling_layer=False, use_mask_token=False)
+        def map_enc_key(k: str) -> str | None:
+            if not k.startswith('encoder.'):
+                return None
+            kk = k[len('encoder.'):]
+            # Old HF ViT layout -> current stable_pretraining/timm-like layout.
+            kk = kk.replace('encoder.layer.', 'layers.')
+            kk = kk.replace('attention.attention.query.', 'attention.q_proj.')
+            kk = kk.replace('attention.attention.key.', 'attention.k_proj.')
+            kk = kk.replace('attention.attention.value.', 'attention.v_proj.')
+            kk = kk.replace('attention.output.dense.', 'attention.o_proj.')
+            kk = kk.replace('intermediate.dense.', 'mlp.fc1.')
+            kk = kk.replace('output.dense.', 'mlp.fc2.')
+            kk = kk.replace('encoder.layernorm.', 'layernorm.')
+            return kk
+
         enc_state = {}
         for k, v in state.items():
-            if k.startswith('encoder.'):
-                enc_state[k[len('encoder.'):]] = v
+            mk = map_enc_key(k)
+            if mk is not None:
+                enc_state[mk] = v
         missing, unexpected = encoder.load_state_dict(enc_state, strict=False)
         if missing or unexpected:
             log(f'Encoder load warnings: missing={len(missing)} unexpected={len(unexpected)}')
