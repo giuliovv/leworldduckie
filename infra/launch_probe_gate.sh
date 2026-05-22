@@ -52,7 +52,7 @@ aws s3 cp "$(dirname "$0")/../src/probe_obs_to_action.py" \
 
 USER_DATA=$(cat <<USERDATA
 #!/bin/bash
-set -uo pipefail
+set -euo pipefail
 LOG=/var/log/probe-gate.log
 exec >>"\$LOG" 2>&1
 export HOME=/root DEBIAN_FRONTEND=noninteractive
@@ -117,7 +117,7 @@ python3 -m venv /opt/probe-venv || fail "venv creation failed"
 /opt/probe-venv/bin/pip install --no-cache-dir "stable-worldmodel[train]" || fail "stable-worldmodel install failed"
 echo "venv deps complete @ \$(date -u)"
 
-python3 - <<'PY'
+/opt/probe-venv/bin/python - <<'PY'
 import boto3
 boto3.client('s3', region_name='us-east-1').put_object(
     Bucket='${S3_BUCKET}',
@@ -162,7 +162,7 @@ echo "\${EXIT_CODE}" >/tmp/exit_code.txt
 echo "probe exit code: \${EXIT_CODE}"
 phase probe_end
 
-python3 - <<'PY'
+/opt/probe-venv/bin/python - <<'PY'
 import boto3
 from pathlib import Path
 s3 = boto3.client('s3', region_name='us-east-1')
