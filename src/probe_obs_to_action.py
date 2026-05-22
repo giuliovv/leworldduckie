@@ -114,27 +114,46 @@ def load_jepa(ckpt_path: str, lewm_dir: str, device: torch.device):
         jepa = getattr(obj, 'model', obj)
     if not hasattr(jepa, 'to'):
         log('Checkpoint is state_dict; rebuilding JEPA architecture for weight load')
-        from jepa import JEPA
-        from module import ARPredictor, Embedder, MLP
-        import stable_pretraining as spt
-
-        embed_dim = 384
-        img_size = 224
-        action_dim = 2
-        history = 3
-        encoder = spt.backbone.utils.vit_hf(
-            'tiny', patch_size=14, image_size=img_size,
-            pretrained=False, use_mask_token=False)
-        projector = MLP(embed_dim, 2048, embed_dim, norm_fn=nn.BatchNorm1d)
-        pred_proj = MLP(embed_dim, 2048, embed_dim, norm_fn=nn.BatchNorm1d)
-        action_encoder = Embedder(
-            input_dim=action_dim, smoothed_dim=action_dim, emb_dim=embed_dim, mlp_scale=4)
-        predictor = ARPredictor(
-            num_frames=history, input_dim=embed_dim, hidden_dim=embed_dim, output_dim=embed_dim,
-            depth=6, heads=16, dim_head=64, mlp_dim=2048, dropout=0.1)
-        jepa = JEPA(encoder, predictor, action_encoder, projector, pred_proj)
         state = obj.get('model', obj) if isinstance(obj, dict) else obj
-        jepa.load_state_dict(state, strict=True)
+        from module import MLP
+        from transformers import ViTConfig, ViTModel
+
+        # Infer embed dim from projector input (projector.net.0.weight: [hidden, embed_dim]).
+        embed_dim = int(state['projector.net.0.weight'].shape[1])
+        proj_hidden = int(state['projector.net.0.weight'].shape[0])
+
+        # Build HF ViT backbone that matches checkpoint key namespace.
+        enc_cfg = ViTConfig(
+            hidden_size=embed_dim,
+            num_hidden_layers=12,
+            num_attention_heads=3,
+            intermediate_size=embed_dim * 4,
+            image_size=224,
+            patch_size=14,
+            qkv_bias=True,
+        )
+        encoder = ViTModel(enc_cfg, add_pooling_layer=False, use_mask_token=False)
+        enc_state = {}
+        for k, v in state.items():
+            if k.startswith('encoder.'):
+                enc_state[k[len('encoder.'):]] = v
+        missing, unexpected = encoder.load_state_dict(enc_state, strict=False)
+        if missing or unexpected:
+            log(f'Encoder load warnings: missing={len(missing)} unexpected={len(unexpected)}')
+
+        projector = MLP(embed_dim, proj_hidden, embed_dim, norm_fn=nn.BatchNorm1d)
+        proj_state = {}
+        for k, v in state.items():
+            if k.startswith('projector.'):
+                proj_state[k[len('projector.'):]] = v
+        projector.load_state_dict(proj_state, strict=True)
+
+        class EncProj(nn.Module):
+            def __init__(self, enc, proj):
+                super().__init__()
+                self.encoder = enc
+                self.projector = proj
+        jepa = EncProj(encoder, projector)
 
     jepa = jepa.to(device)
     jepa.eval()
