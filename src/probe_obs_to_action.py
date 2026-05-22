@@ -103,15 +103,16 @@ def load_jepa(ckpt_path: str, lewm_dir: str, device: torch.device):
 
 def load_pixels_actions(h5_path: str, max_samples: int, seed: int):
     with h5py.File(h5_path, 'r') as f:
-        px = f['pixels'][:]
-        act = f['action'][:]
-
-    n = len(px)
-    if max_samples > 0 and max_samples < n:
-        rng = np.random.default_rng(seed)
-        idx = rng.choice(n, size=max_samples, replace=False)
-        px = px[idx]
-        act = act[idx]
+        px_ds = f['pixels']
+        act_ds = f['action']
+        n = len(px_ds)
+        if max_samples > 0 and max_samples < n:
+            rng = np.random.default_rng(seed)
+            idx = np.sort(rng.choice(n, size=max_samples, replace=False))
+        else:
+            idx = np.arange(n)
+        px = px_ds[idx]
+        act = act_ds[idx]
 
     x = torch.from_numpy(px.astype(np.float32) / 255.0).permute(0, 3, 1, 2)
     y = torch.from_numpy(act.astype(np.float32))
