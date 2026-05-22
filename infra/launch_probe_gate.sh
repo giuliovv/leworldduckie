@@ -40,6 +40,7 @@ while [[ $# -gt 0 ]]; do
         --encode-batch-size) ENCODE_BATCH_SIZE=$2; shift 2 ;;
         --hard-timeout-min) HARD_TIMEOUT_MIN=$2; shift 2 ;;
         --instance-type) INSTANCE_TYPE=$2; shift 2 ;;
+        --subnet) SUBNET=$2; shift 2 ;;
         --on-demand) MARKET_MODE=ondemand; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
