@@ -203,6 +203,46 @@ def load_pixels_actions(h5_path: str, max_samples: int, seed: int):
 
 
 @torch.no_grad()
+def encode_dataset_to_latent(jepa, h5_path: str, max_samples: int, seed: int, device: torch.device, img_size: int, batch_size: int):
+    t0 = time.time()
+    log(f'Encoding dataset directly from HDF5: {h5_path}')
+    mean = IMAGENET_MEAN.to(device)
+    std = IMAGENET_STD.to(device)
+    zs, ys = [], []
+    with h5py.File(h5_path, 'r') as f:
+        px_ds = f['pixels']
+        act_ds = f['action']
+        n = len(px_ds)
+        if max_samples > 0 and max_samples < n:
+            rng = np.random.default_rng(seed)
+            idx = np.sort(rng.choice(n, size=max_samples, replace=False))
+        else:
+            idx = np.arange(n)
+        log(f'HDF5 rows={n}, selected={len(idx)}')
+        total_batches = (len(idx) + batch_size - 1) // batch_size
+        for bi, i in enumerate(range(0, len(idx), batch_size), start=1):
+            bidx = idx[i:i+batch_size]
+            px = px_ds[bidx]
+            act = act_ds[bidx]
+            xb = torch.from_numpy(px.astype(np.float32) / 255.0).permute(0, 3, 1, 2).to(device)
+            if xb.shape[-2:] != (img_size, img_size):
+                xb = F.interpolate(xb, size=(img_size, img_size), mode='bilinear', align_corners=False)
+            xb = (xb - mean) / std
+            emb = jepa.encoder(xb, interpolate_pos_encoding=True)
+            emb = extract_encoder_tensor(emb)
+            z = jepa.projector(emb).cpu()
+            y = torch.from_numpy(act.astype(np.float32))
+            zs.append(z)
+            ys.append(y)
+            if bi == 1 or bi % 10 == 0 or bi == total_batches:
+                log(f'Encoded batch {bi}/{total_batches} (rss={rss_gb():.2f} GB)')
+    z_all = torch.cat(zs, dim=0)
+    y_all = torch.cat(ys, dim=0)
+    log(f'Direct latent encoding done z={tuple(z_all.shape)} y={tuple(y_all.shape)} in {time.time()-t0:.1f}s (rss={rss_gb():.2f} GB)')
+    return z_all, y_all
+
+
+@torch.no_grad()
 def encode_to_latent(jepa, x, device: torch.device, img_size: int, batch_size: int):
     log(f'Encoding to latent on device={device} batch_size={batch_size} samples={x.shape[0]}')
     zs = []
@@ -319,19 +359,23 @@ def run_one_dataset(
     encode_batch_size: int,
 ):
     log(f'=== Dataset: {data_path} ===')
-    x, y = load_pixels_actions(data_path, max_samples=max_samples, seed=seed)
-    tr, va = split_indices(x.shape[0], seed=seed)
 
     if mode == 'encoder':
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         log(f'Probe mode=encoder using device={device}')
         jepa = load_jepa(ckpt_path, lewm_dir, device)
-        z = encode_to_latent(jepa, x, device=device, img_size=img_size, batch_size=encode_batch_size)
+        z, y = encode_dataset_to_latent(
+            jepa, h5_path=data_path, max_samples=max_samples, seed=seed,
+            device=device, img_size=img_size, batch_size=encode_batch_size
+        )
+        tr, va = split_indices(z.shape[0], seed=seed)
         xtr, xva = z[tr], z[va]
         ytr, yva = y[tr], y[va]
         model = MLPProbe(in_dim=xtr.shape[1])
         result = fit_probe(model, xtr, ytr, xva, yva, epochs=epochs, batch_size=batch_size, lr=lr)
     elif mode == 'cnn':
+        x, y = load_pixels_actions(data_path, max_samples=max_samples, seed=seed)
+        tr, va = split_indices(x.shape[0], seed=seed)
         model = SmallCNN()
         xtr, xva = x[tr], x[va]
         ytr, yva = y[tr], y[va]

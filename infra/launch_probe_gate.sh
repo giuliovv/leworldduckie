@@ -75,6 +75,17 @@ fail() {
   exit 1
 }
 
+finalize_and_shutdown() {
+  local code="${1:-1}"
+  echo "$code" >/tmp/exit_code.txt
+  aws s3 cp /tmp/exit_code.txt "${S3_PREFIX}/exit_code.txt" --quiet 2>/dev/null || true
+  [[ -f /tmp/probe_results.txt ]] && aws s3 cp /tmp/probe_results.txt "${S3_PREFIX}/probe_results.txt" --quiet 2>/dev/null || true
+  [[ -f /tmp/error.txt ]] && aws s3 cp /tmp/error.txt "${S3_PREFIX}/error.txt" --quiet 2>/dev/null || true
+  aws s3 cp "$LOG" "${S3_PREFIX}/instance.log" --quiet 2>/dev/null || true
+  echo "=== finalize code=$code @ $(date -u) ==="
+  shutdown -h now || true
+}
+
 # Hard watchdog timeout (minutes): force shutdown even if hung
 (
   sleep \$(( ${HARD_TIMEOUT_MIN} * 60 ))
@@ -146,6 +157,7 @@ echo "sources ready @ \$(date -u)"
 ) &
 
 phase probe_start
+set +e
 /opt/probe-venv/bin/python -u ./probe_obs_to_action.py \
   --mode ${MODE} \
   --ckpt ${CKPT_S3} \
@@ -158,6 +170,7 @@ phase probe_start
   --encode-batch-size ${ENCODE_BATCH_SIZE} \
   2>&1 | tee /tmp/probe_results.txt
 EXIT_CODE=\${PIPESTATUS[0]}
+set -e
 echo "\${EXIT_CODE}" >/tmp/exit_code.txt
 echo "probe exit code: \${EXIT_CODE}"
 phase probe_end
@@ -181,7 +194,7 @@ for src, key in [
 PY
 
 echo "=== done @ \$(date -u); shutting down ==="
-shutdown -h now
+finalize_and_shutdown "${EXIT_CODE}"
 USERDATA
 )
 
