@@ -22,13 +22,13 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 # ── Config ────────────────────────────────────────────────────────────────────
-S3_BUCKET     = 'leworldduckie'
-S3_DATA_KEY   = 'data/duckietown_100k.h5'
-S3_RUNS_PREFIX = 'training/runs'
-S3_SCRIPT_KEY  = 'training/train.py'
+S3_BUCKET      = os.environ.get('S3_BUCKET', 'leworldduckie')
+S3_DATA_KEY    = os.environ.get('S3_DATA_KEY', 'data/duckietown_100k.h5')
+S3_RUNS_PREFIX = os.environ.get('S3_RUNS_PREFIX', 'training/runs')
+S3_SCRIPT_KEY  = os.environ.get('S3_SCRIPT_KEY', 'training/train.py')
 
-LEWM_DIR  = Path('/tmp/le-wm')
-DATA_PATH = Path('/tmp/duckietown_100k.h5')
+LEWM_DIR  = Path(os.environ.get('LEWM_DIR', '/tmp/le-wm'))
+DATA_PATH = Path(os.environ.get('DATA_PATH', '/tmp/duckietown_100k.h5'))
 
 IMG_H, IMG_W  = 120, 160
 IMG_C         = 3
@@ -38,8 +38,8 @@ HISTORY       = 3
 N_PREDS       = 1
 SEQ_LEN       = HISTORY + N_PREDS
 FRAMESKIP     = 3
-N_EPOCHS      = 50
-BATCH_SIZE    = 128
+N_EPOCHS      = int(os.environ.get('N_EPOCHS', '50'))
+BATCH_SIZE    = int(os.environ.get('BATCH_SIZE', '128'))
 LR            = 5e-4
 SIGREG_W      = 0.09
 SEED          = 42
