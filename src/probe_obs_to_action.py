@@ -103,10 +103,34 @@ def load_jepa(ckpt_path: str, lewm_dir: str, device: torch.device):
     lewm_dir = guess_lewm_dir(lewm_dir)
     ensure_lewm(lewm_dir)
     obj = torch.load(ckpt_path, map_location=device, weights_only=False)
-    if isinstance(obj, dict) and 'model' in obj:
+    if isinstance(obj, dict) and 'model' in obj and hasattr(obj['model'], 'to'):
         jepa = obj['model']
     else:
         jepa = getattr(obj, 'model', obj)
+    if not hasattr(jepa, 'to'):
+        log('Checkpoint is state_dict; rebuilding JEPA architecture for weight load')
+        from jepa import JEPA
+        from module import ARPredictor, Embedder, MLP
+        import stable_pretraining as spt
+
+        embed_dim = 384
+        img_size = 224
+        action_dim = 2
+        history = 3
+        encoder = spt.backbone.utils.vit_hf(
+            'tiny', patch_size=14, image_size=img_size,
+            pretrained=False, use_mask_token=False)
+        projector = MLP(embed_dim, 2048, embed_dim, norm_fn=nn.BatchNorm1d)
+        pred_proj = MLP(embed_dim, 2048, embed_dim, norm_fn=nn.BatchNorm1d)
+        action_encoder = Embedder(
+            input_dim=action_dim, smoothed_dim=action_dim, emb_dim=embed_dim, mlp_scale=4)
+        predictor = ARPredictor(
+            num_frames=history, input_dim=embed_dim, hidden_dim=embed_dim, output_dim=embed_dim,
+            depth=6, heads=16, dim_head=64, mlp_dim=2048, dropout=0.1)
+        jepa = JEPA(encoder, predictor, action_encoder, projector, pred_proj)
+        state = obj.get('model', obj) if isinstance(obj, dict) else obj
+        jepa.load_state_dict(state, strict=True)
+
     jepa = jepa.to(device)
     jepa.eval()
     for p in jepa.parameters():
