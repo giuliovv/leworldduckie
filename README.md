@@ -21,6 +21,14 @@ leworldduckie/
 └── data/                    # local outputs: HDF5 dataset, plots (gitignored)
 ```
 
+## Notebook organization
+
+- Active notebooks: `notebooks/active/`
+- Historical notebooks: `notebooks/history/`
+- Current retrain entrypoint: `notebooks/active/lewm_duckie_explore_retrain.ipynb`
+
+Legacy top-level notebooks are kept for backward compatibility and historical traceability.
+
 ## Dataset
 
 100k transitions collected on EC2 from the real `gym-duckietown` simulator (6 maps, PD lane-follower with Gaussian noise). Stored at:
