@@ -194,7 +194,7 @@ for src, key in [
 PY
 
 echo "=== done @ \$(date -u); shutting down ==="
-finalize_and_shutdown "${EXIT_CODE}"
+finalize_and_shutdown "\${EXIT_CODE}"
 USERDATA
 )
 
