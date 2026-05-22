@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 import h5py
@@ -24,6 +25,18 @@ from sklearn.metrics import r2_score
 
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+
+def log(msg: str) -> None:
+    print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {msg}', flush=True)
+
+
+def rss_gb() -> float:
+    try:
+        import resource
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0 / 1024.0
+    except Exception:
+        return -1.0
 
 
 def resolve_local_or_s3(path: str) -> str:
@@ -102,28 +115,37 @@ def load_jepa(ckpt_path: str, lewm_dir: str, device: torch.device):
 
 
 def load_pixels_actions(h5_path: str, max_samples: int, seed: int):
+    t0 = time.time()
+    log(f'Loading dataset: {h5_path}')
     with h5py.File(h5_path, 'r') as f:
         px_ds = f['pixels']
         act_ds = f['action']
         n = len(px_ds)
+        log(f'HDF5 rows={n}, max_samples={max_samples}')
         if max_samples > 0 and max_samples < n:
             rng = np.random.default_rng(seed)
             idx = np.sort(rng.choice(n, size=max_samples, replace=False))
+            log(f'Sampled rows={len(idx)}')
         else:
             idx = np.arange(n)
+            log(f'Using full rows={len(idx)}')
         px = px_ds[idx]
         act = act_ds[idx]
 
     x = torch.from_numpy(px.astype(np.float32) / 255.0).permute(0, 3, 1, 2)
     y = torch.from_numpy(act.astype(np.float32))
+    log(f'Loaded tensors x={tuple(x.shape)} y={tuple(y.shape)} in {time.time()-t0:.1f}s (rss={rss_gb():.2f} GB)')
     return x, y
 
 
 @torch.no_grad()
 def encode_to_latent(jepa, x, device: torch.device, img_size: int, batch_size: int):
+    log(f'Encoding to latent on device={device} batch_size={batch_size} samples={x.shape[0]}')
     zs = []
     mean = IMAGENET_MEAN.to(device)
     std = IMAGENET_STD.to(device)
+    total_batches = (x.shape[0] + batch_size - 1) // batch_size
+    t0 = time.time()
     for i in range(0, x.shape[0], batch_size):
         xb = x[i:i+batch_size].to(device)
         if xb.shape[-2:] != (img_size, img_size):
@@ -133,7 +155,12 @@ def encode_to_latent(jepa, x, device: torch.device, img_size: int, batch_size: i
         emb = extract_encoder_tensor(emb)
         z = jepa.projector(emb)
         zs.append(z.cpu())
-    return torch.cat(zs, dim=0)
+        bi = i // batch_size + 1
+        if bi == 1 or bi % 10 == 0 or bi == total_batches:
+            log(f'Encoded batch {bi}/{total_batches} (rss={rss_gb():.2f} GB)')
+    out = torch.cat(zs, dim=0)
+    log(f'Latent encoding done shape={tuple(out.shape)} in {time.time()-t0:.1f}s')
+    return out
 
 
 class MLPProbe(nn.Module):
@@ -184,6 +211,7 @@ def fit_probe(model, xtr, ytr, xva, yva, epochs: int, batch_size: int, lr: float
     loss_fn = nn.MSELoss()
 
     for ep in range(epochs):
+        ep_t0 = time.time()
         model.train()
         perm = torch.randperm(xtr.shape[0])
         total = 0.0
@@ -195,7 +223,7 @@ def fit_probe(model, xtr, ytr, xva, yva, epochs: int, batch_size: int, lr: float
             loss.backward()
             opt.step()
             total += float(loss.item()) * len(b)
-        print(f'epoch {ep+1}/{epochs} train_mse={total/xtr.shape[0]:.6f}')
+        log(f'epoch {ep+1}/{epochs} train_mse={total/xtr.shape[0]:.6f} dur={time.time()-ep_t0:.1f}s rss={rss_gb():.2f} GB')
 
     model.eval()
     with torch.no_grad():
@@ -226,12 +254,13 @@ def run_one_dataset(
     img_size: int,
     encode_batch_size: int,
 ):
-    print(f'\n=== Dataset: {data_path} ===')
+    log(f'=== Dataset: {data_path} ===')
     x, y = load_pixels_actions(data_path, max_samples=max_samples, seed=seed)
     tr, va = split_indices(x.shape[0], seed=seed)
 
     if mode == 'encoder':
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        log(f'Probe mode=encoder using device={device}')
         jepa = load_jepa(ckpt_path, lewm_dir, device)
         z = encode_to_latent(jepa, x, device=device, img_size=img_size, batch_size=encode_batch_size)
         xtr, xva = z[tr], z[va]
@@ -246,19 +275,19 @@ def run_one_dataset(
     else:
         raise ValueError(f'Unknown mode: {mode}')
 
-    print('obs -> action probe R²:')
-    print(f"  train velocity: {result['train_r2_vel']:.4f}")
-    print(f"  train steering: {result['train_r2_steer']:.4f}")
-    print(f"  val velocity:   {result['val_r2_vel']:.4f}")
-    print(f"  val steering:   {result['val_r2_steer']:.4f}")
+    log('obs -> action probe R²:')
+    log(f"  train velocity: {result['train_r2_vel']:.4f}")
+    log(f"  train steering: {result['train_r2_steer']:.4f}")
+    log(f"  val velocity:   {result['val_r2_vel']:.4f}")
+    log(f"  val steering:   {result['val_r2_steer']:.4f}")
 
     s = result['val_r2_steer']
     if s < 0.6:
-        print('Decision: PASS (steering val R² < 0.6).')
+        log('Decision: PASS (steering val R² < 0.6).')
     elif s <= 0.8:
-        print('Decision: MARGINAL (0.6-0.8). Increase steer noise std to 0.45 and recollect.')
+        log('Decision: MARGINAL (0.6-0.8). Increase steer noise std to 0.45 and recollect.')
     else:
-        print('Decision: FAIL (>0.8). Increase steer noise std to 0.6 and recollect.')
+        log('Decision: FAIL (>0.8). Increase steer noise std to 0.6 and recollect.')
 
     return result
 
