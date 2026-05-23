@@ -35,13 +35,15 @@ IMG_C         = 3
 ACTION_DIM    = 2
 EMBED_DIM     = 192
 HISTORY       = 3
-N_PREDS       = 1
+N_PREDS       = int(os.environ.get('N_PREDS', '1'))
 SEQ_LEN       = HISTORY + N_PREDS
-FRAMESKIP     = 3
+FRAMESKIP     = int(os.environ.get('FRAMESKIP', '3'))
 N_EPOCHS      = int(os.environ.get('N_EPOCHS', '50'))
 BATCH_SIZE    = int(os.environ.get('BATCH_SIZE', '128'))
 LR            = 5e-4
-SIGREG_W      = 0.09
+SIGREG_W      = float(os.environ.get('SIGREG_W', '0.09'))
+ACTION_SCALE  = float(os.environ.get('ACTION_SCALE', '0.0'))  # 0 = no constant scaling
+S3_UPLOAD_ENABLED = os.environ.get('S3_UPLOAD_ENABLED', 'true').lower() != 'false'
 SEED          = 42
 LAG_FRAMES    = 4     # gym-duckietown PWM lag steps to skip per episode
 IMG_SIZE      = 224   # ViT-Tiny input size
@@ -57,6 +59,8 @@ def log(msg):
 s3 = boto3.client('s3', region_name='us-east-1')
 
 def s3_upload(local_path, s3_key):
+    if not S3_UPLOAD_ENABLED:
+        return
     s3.upload_file(str(local_path), S3_BUCKET, s3_key)
     log(f's3 upload: {s3_key}')
 
@@ -73,9 +77,13 @@ def s3_exists(s3_key):
         return False
 
 def s3_put_text(s3_key, text):
+    if not S3_UPLOAD_ENABLED:
+        return
     s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=text.encode())
 
 def s3_append_jsonl(s3_key, obj):
+    if not S3_UPLOAD_ENABLED:
+        return
     try:
         existing = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)['Body'].read().decode()
     except Exception:
@@ -201,6 +209,8 @@ def step_fn(batch, model, sigreg, device, dtype, lam=SIGREG_W):
     out     = model.encode(batch)
     emb     = out['emb']
     act_emb = out['act_emb']
+    if ACTION_SCALE > 0:
+        act_emb = act_emb * ACTION_SCALE
     ctx_emb = emb[:, :HISTORY]
     ctx_act = act_emb[:, :HISTORY]
     tgt_emb = emb[:, N_PREDS:]
@@ -314,7 +324,7 @@ def main():
     ckpt_s3_key   = f'{run_prefix}/checkpoint_latest.pt'
     metrics_key   = f'{run_prefix}/metrics.jsonl'
 
-    if s3_exists(ckpt_s3_key):
+    if S3_UPLOAD_ENABLED and s3_exists(ckpt_s3_key):
         log('Resuming from checkpoint ...')
         local_ckpt = local_run / 'checkpoint_latest.pt'
         s3_download(ckpt_s3_key, local_ckpt)
