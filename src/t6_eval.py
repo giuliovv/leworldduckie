@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -33,6 +34,12 @@ EMBED_DIM  = 192
 ACTION_DIM = 2
 HISTORY    = 3
 LAG_FRAMES = 4   # same guard as frame_similarity.py
+
+# MUST match the ACTION_SCALE the checkpoint was trained with (train.py step_fn:
+# act_emb * ACTION_SCALE when > 0, raw otherwise). Evaluating with a different
+# scaling than training invalidates every action-sensitivity number this
+# script produces. 0 = no scaling (correct for the April fs6_npreds4_ep20 run).
+ACTION_SCALE = float(os.environ.get('ACTION_SCALE', '0.0'))
 
 
 def _ensure_lewm():
@@ -115,12 +122,16 @@ def encode_pixel_batch(model, px_uint8_batch, device):
     return model.encode({'pixels': px.unsqueeze(1)})['emb'][:, 0]  # (B, D)
 
 
-def _norm_act_like_training(act_emb, frame_emb):
-    """Replicate per-batch action normalization used in step_fn during training."""
-    frame_norm = frame_emb.norm(dim=-1).mean()
-    act_norm   = act_emb.norm(dim=-1).mean()
-    if act_norm > 1e-6:
-        act_emb = act_emb * (frame_norm / act_norm)
+def _scale_act_like_training(act_emb):
+    """Replicate train.py step_fn exactly: constant ACTION_SCALE multiplier.
+
+    The previous version of this helper applied *dynamic* per-batch
+    normalization (rescale act norm to frame norm) which never matched any
+    training configuration — train.py has only ever used raw embeddings or a
+    constant multiplier. That mismatch skewed historical T6 measurements.
+    """
+    if ACTION_SCALE > 0:
+        return act_emb * ACTION_SCALE
     return act_emb
 
 
@@ -134,7 +145,7 @@ def ar_rollout(model, z_ctx, action_2d_seq, n_steps, device):
                     The same action is broadcast to fill each HISTORY window.
     n_steps:        number of steps to roll forward
 
-    Applies the same per-batch action normalization as training step_fn.
+    Applies the same constant ACTION_SCALE as training step_fn (env var).
 
     Returns: (B, n_steps, D) predicted embeddings
     """
@@ -150,7 +161,7 @@ def ar_rollout(model, z_ctx, action_2d_seq, n_steps, device):
         # Build action window: repeat the step's action HISTORY times
         a_step  = action_2d_seq[:, step:step+1].expand(B, HISTORY, -1)  # (B, H, 2)
         act_emb = model.action_encoder(a_step.to(device))               # (B, H, D)
-        act_emb = _norm_act_like_training(act_emb, ctx_emb)
+        act_emb = _scale_act_like_training(act_emb)
 
         pred = model.predictor(ctx_emb, act_emb)      # (B, HISTORY, D)
         next_z = model.pred_proj(

@@ -34,6 +34,19 @@ HISTORY    = 3   # predictor context window (= notebook HISTORY)
 FRAMESKIP  = 1   # env steps per predictor step — must match notebook FRAMESKIP
 LAG_FRAMES = 4   # duckietown PWM warm-up steps to discard at episode start
 
+# MUST match the ACTION_SCALE the checkpoint was trained with (train.py
+# step_fn: act_emb * ACTION_SCALE when > 0, raw otherwise). A mismatch makes
+# the predictor see action magnitudes it never saw in training, corrupting
+# every CEM rollout. 0 = no scaling.
+ACTION_SCALE = float(os.environ.get('ACTION_SCALE', '0.0'))
+
+
+def _scale_act(act_emb):
+    """Apply the training-time constant action scaling to action embeddings."""
+    if ACTION_SCALE > 0:
+        return act_emb * ACTION_SCALE
+    return act_emb
+
 # Action bounds: [velocity, steering]
 ACT_LO = np.array([0.1, -1.0], dtype=np.float32)
 ACT_HI = np.array([0.6,  1.0], dtype=np.float32)
@@ -409,7 +422,7 @@ def cem_plan(
         noise      = torch.randn(n_samples, horizon, ACTION_DIM, device=device)
         candidates = torch.clamp(mu + sigma * noise, lo, hi)
 
-        fut_act_embs = model.action_encoder(candidates)
+        fut_act_embs = _scale_act(model.action_encoder(candidates))
 
         emb_win = ctx_e.clone()
         act_win = ctx_a.clone()
@@ -518,8 +531,8 @@ def run_episode(model, z_goal, env, ep_idx: int, args, device,
             past_acts = torch.from_numpy(
                 np.array(past, dtype=np.float32)).to(device)
             with torch.no_grad():
-                ctx_act_past = model.action_encoder(
-                    past_acts.unsqueeze(0))[0]                 # (H-1, D)
+                ctx_act_past = _scale_act(model.action_encoder(
+                    past_acts.unsqueeze(0)))[0]                # (H-1, D)
 
             ws = None
             if warm_start is not None:
