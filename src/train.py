@@ -195,7 +195,16 @@ class DuckietownH5Dataset(Dataset):
 
 
 # ── Encoder ───────────────────────────────────────────────────────────────────
+# ALLOW_CNN_FALLBACK: the CNN fallback is a completely different, much smaller
+# architecture than the ViT-Tiny this project is built around (2026-07-01: a
+# whole Colab retrain silently trained the CNN fallback for 50 epochs and
+# produced a checkpoint that failed to even load in t6_eval.py, because the
+# notebook's environment was missing stable_pretraining and this function
+# swallowed that exception instead of failing loudly). Default is now to
+# raise immediately — set ALLOW_CNN_FALLBACK=true only for a deliberate
+# quick smoke-test where architecture fidelity doesn't matter.
 def make_encoder(embed_dim):
+    allow_fallback = os.environ.get('ALLOW_CNN_FALLBACK', 'false').lower() == 'true'
     try:
         import stable_pretraining as spt
         enc = spt.backbone.utils.vit_hf(
@@ -205,7 +214,14 @@ def make_encoder(embed_dim):
         log('Using ViT-Tiny encoder')
         return enc, IMG_SIZE
     except Exception as e:
-        log(f'ViT unavailable ({e}), using CNN encoder')
+        if not allow_fallback:
+            raise RuntimeError(
+                f'ViT-Tiny encoder unavailable ({e!r}) — refusing to silently train '
+                'the CNN fallback (wrong architecture, invalidates the run). '
+                'Fix the environment (pip install stable-worldmodel[train]) or set '
+                'ALLOW_CNN_FALLBACK=true if this is a deliberate smoke test.'
+            ) from e
+        log(f'ViT unavailable ({e}), ALLOW_CNN_FALLBACK=true — using CNN encoder')
 
     class CNNEncoder(nn.Module):
         def __init__(self):
@@ -315,6 +331,7 @@ def main():
     log(f'Device: {device}  dtype: {dtype}')
 
     encoder, img_size = make_encoder(EMBED_DIM)
+    encoder_type = type(encoder).__name__  # stamped into every checkpoint below
     full_ds   = DuckietownH5Dataset(DATA_PATH, num_steps=SEQ_LEN,
                                      frameskip=FRAMESKIP, img_size=img_size,
                                      skip_initial_steps=LAG_FRAMES)
@@ -434,7 +451,8 @@ def main():
                 'epoch': epoch, 'model': model.state_dict(),
                 'sigreg': sigreg.state_dict(), 'optimizer': optimizer.state_dict(),
                 'train_losses': train_losses, 'val_losses': val_losses,
-                'best_val': best_val,
+                'best_val': best_val, 'encoder_type': encoder_type,
+                'action_scale': ACTION_SCALE,
             }
             local_ckpt = local_run / 'checkpoint_latest.pt'
             torch.save(ckpt_data, local_ckpt)

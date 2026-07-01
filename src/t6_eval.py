@@ -86,6 +86,19 @@ def load_model(ckpt_path, device):
     model = _build_model(device)
     ckpt  = torch.load(ckpt_path, map_location=device, weights_only=False)
     state = ckpt.get('model', ckpt)
+    ckpt_encoder = ckpt.get('encoder_type')
+    if ckpt_encoder is not None and ckpt_encoder != 'ViTModel':
+        raise RuntimeError(
+            f"Checkpoint was trained with encoder_type={ckpt_encoder!r}, not the "
+            f"ViT-Tiny this eval assumes — the run that produced this checkpoint "
+            f"used the CNN fallback (see ALLOW_CNN_FALLBACK in train.py) and must "
+            f"be retrained with a working stable_pretraining install.")
+    ckpt_scale = ckpt.get('action_scale')
+    if ckpt_scale is not None and abs(ckpt_scale - ACTION_SCALE) > 1e-9:
+        raise RuntimeError(
+            f"Checkpoint was trained with ACTION_SCALE={ckpt_scale}, but this eval "
+            f"is running with ACTION_SCALE={ACTION_SCALE} — set the env var to match "
+            f"before running t6_eval.py.")
     model.load_state_dict(state, strict=True)
     model.eval()
     best_val = ckpt.get('best_val', None)
