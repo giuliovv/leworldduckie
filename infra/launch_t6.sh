@@ -27,17 +27,24 @@ N_SAMPLES=100
 BATCH_SIZE=32
 MAX_HORIZON=5
 N_ROLLOUT_STEPS=3
+# MUST match the ACTION_SCALE the checkpoint was trained with (train.py
+# step_fn / TRAIN_ENV in the retrain notebook). 0 = no scaling.
+ACTION_SCALE=0
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --ckpt)             CKPT=$2;             shift 2 ;;
+        --data-path)        DATA_S3=$2;          shift 2 ;;
         --n-samples)        N_SAMPLES=$2;        shift 2 ;;
         --batch-size)       BATCH_SIZE=$2;       shift 2 ;;
         --max-horizon)      MAX_HORIZON=$2;      shift 2 ;;
         --n-rollout-steps)  N_ROLLOUT_STEPS=$2;  shift 2 ;;
+        --action-scale)     ACTION_SCALE=$2;     shift 2 ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
+
+echo "==> ACTION_SCALE=${ACTION_SCALE} (must match training config for this checkpoint)"
 
 echo "==> Uploading t6_eval.py to S3 ..."
 aws s3 cp "$(dirname "$0")/../src/t6_eval.py" \
@@ -79,7 +86,7 @@ print('t6_eval.py ok')
 "
 
 cd /tmp
-python3 t6_eval.py \
+ACTION_SCALE=${ACTION_SCALE} python3 t6_eval.py \
     --ckpt ${CKPT} \
     --data-path ${DATA_S3} \
     --n-samples ${N_SAMPLES} \
