@@ -58,11 +58,27 @@ def log(msg):
 # ── S3 helpers ────────────────────────────────────────────────────────────────
 s3 = boto3.client('s3', region_name='us-east-1')
 
+# Upload failures must never kill a training run — checkpoints stay on local
+# disk and the loud warnings tell the operator to copy them out before the
+# runtime dies. (This is how the 2026-05 Colab retrain was lost: no AWS
+# credentials in the runtime → unhandled exception on first checkpoint upload.)
+_S3_UPLOAD_FAILURES = 0
+
+def _warn_upload_failure(s3_key, err, local_hint=None):
+    global _S3_UPLOAD_FAILURES
+    _S3_UPLOAD_FAILURES += 1
+    log(f'!!! S3 UPLOAD FAILED ({_S3_UPLOAD_FAILURES}x) {s3_key}: {err}')
+    if local_hint:
+        log(f'!!! artifact remains at {local_hint} — copy it out before the runtime is lost')
+
 def s3_upload(local_path, s3_key):
     if not S3_UPLOAD_ENABLED:
         return
-    s3.upload_file(str(local_path), S3_BUCKET, s3_key)
-    log(f's3 upload: {s3_key}')
+    try:
+        s3.upload_file(str(local_path), S3_BUCKET, s3_key)
+        log(f's3 upload: {s3_key}')
+    except Exception as e:
+        _warn_upload_failure(s3_key, e, local_hint=local_path)
 
 def s3_download(s3_key, local_path, show_progress=False):
     size = s3.head_object(Bucket=S3_BUCKET, Key=s3_key)['ContentLength']
@@ -79,7 +95,10 @@ def s3_exists(s3_key):
 def s3_put_text(s3_key, text):
     if not S3_UPLOAD_ENABLED:
         return
-    s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=text.encode())
+    try:
+        s3.put_object(Bucket=S3_BUCKET, Key=s3_key, Body=text.encode())
+    except Exception as e:
+        _warn_upload_failure(s3_key, e)
 
 def s3_append_jsonl(s3_key, obj):
     if not S3_UPLOAD_ENABLED:
@@ -88,8 +107,11 @@ def s3_append_jsonl(s3_key, obj):
         existing = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)['Body'].read().decode()
     except Exception:
         existing = ''
-    s3.put_object(Bucket=S3_BUCKET, Key=s3_key,
-                  Body=(existing + json.dumps(obj) + '\n').encode())
+    try:
+        s3.put_object(Bucket=S3_BUCKET, Key=s3_key,
+                      Body=(existing + json.dumps(obj) + '\n').encode())
+    except Exception as e:
+        _warn_upload_failure(s3_key, e)
 
 
 def fetch_ckpt(path):
@@ -253,6 +275,20 @@ def main():
 
     log(f'Run ID: {run_id}')
     log(f'S3 prefix: s3://{S3_BUCKET}/{run_prefix}/')
+    log(f'Config: FRAMESKIP={FRAMESKIP} N_PREDS={N_PREDS} HISTORY={HISTORY} '
+        f'SIGREG_W={SIGREG_W} ACTION_SCALE={ACTION_SCALE} '
+        f'EPOCHS={args.epochs} BATCH={BATCH_SIZE}')
+
+    # Fail fast on missing credentials instead of dying at the first
+    # checkpoint upload 20 GPU-minutes in.
+    if S3_UPLOAD_ENABLED:
+        try:
+            boto3.client('sts').get_caller_identity()
+            log('S3 uploads: credentials OK')
+        except Exception as e:
+            log(f'!!! S3 uploads ENABLED but AWS credentials are BROKEN: {e}')
+            log('!!! Fix credentials or set S3_UPLOAD_ENABLED=false. '
+                'Training will continue; artifacts stay on local disk.')
 
     # ── Clone le-wm ──────────────────────────────────────────────────────────
     if not LEWM_DIR.exists():
